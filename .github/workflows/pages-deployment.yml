@@ -28,12 +28,22 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Check Cloudflare credentials
+        id: cloudflare-ready
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.CLOUDFLARE_API_TOKEN }}" ] && [ -n "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Waiting for Cloudflare API token
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN == '' }}
+        if: ${{ steps.cloudflare-ready.outputs.ready != 'true' }}
         run: echo "Add the CLOUDFLARE_API_TOKEN repository secret to enable automatic Cloudflare Pages deploys."
 
       - name: Deploy with Wrangler
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        if: ${{ steps.cloudflare-ready.outputs.ready == 'true' }}
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
