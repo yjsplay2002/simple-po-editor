@@ -22,7 +22,7 @@ const state = {
   selectedEntryId: "",
   sessionId: loadSessionId(),
   statusFilter: "all",
-  storageMode: "memory"
+  storageMode: "checking"
 };
 
 const root = document.querySelector("#app");
@@ -83,6 +83,18 @@ function setRoute(id) {
 
 function defaultDisplayName() {
   return state.displayName.trim() || `Editor ${state.sessionId.slice(0, 4)}`;
+}
+
+function storageSummary() {
+  if (state.storageMode === "d1") {
+    return "Shared documents are stored in Cloudflare D1 and stay available from any browser with the link.";
+  }
+
+  if (state.storageMode === "memory") {
+    return "Local dev uses memory mode and resets on restart.";
+  }
+
+  return "Checking shared storage availability for this deployment.";
 }
 
 function isEditing() {
@@ -202,8 +214,18 @@ function clearDocumentState() {
   state.document = null;
   state.lock = null;
   state.meta = null;
-  state.storageMode = "memory";
   state.dirty = false;
+}
+
+async function detectStorageMode() {
+  try {
+    const payload = await apiFetch("/api/status");
+    state.storageMode = payload.storageMode || "checking";
+  } catch {
+    state.storageMode = "checking";
+  }
+
+  render();
 }
 
 async function loadDocument(id, { quiet = false } = {}) {
@@ -561,7 +583,7 @@ function renderHome() {
           </div>
 
           <p class="muted" style="margin-top: 16px;">
-            Current storage mode: <span class="mono">${state.storageMode}</span>. Local dev uses memory mode and resets on restart.
+            Current storage mode: <span class="mono">${state.storageMode}</span>. ${escapeHtml(storageSummary())}
           </p>
         </aside>
       </div>
@@ -970,6 +992,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 async function boot() {
+  await detectStorageMode();
   const routedId = parseRoute();
 
   if (routedId) {

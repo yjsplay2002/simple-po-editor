@@ -222,8 +222,12 @@ function requireStorage(env) {
   throw new StorageConfigError("Persistent storage is not configured. Add a D1 binding named DB before using this deployment.");
 }
 
+export function getStorageMode(env) {
+  return requireStorage(env);
+}
+
 export async function createDocument(env, payload) {
-  const storageMode = requireStorage(env);
+  const storageMode = getStorageMode(env);
   const content = sanitizeDocument(payload.document);
   const id = createId();
   const createdAt = nowIso();
@@ -271,7 +275,7 @@ export async function getDocument(env, id, sessionId = "") {
     return null;
   }
 
-  const storageMode = requireStorage(env);
+  const storageMode = getStorageMode(env);
 
   if (storageMode === "d1") {
     const record = await getD1Document(env.DB, id);
@@ -295,7 +299,7 @@ export async function acquireLock(env, payload) {
     return null;
   }
 
-  const storageMode = requireStorage(env);
+  const storageMode = getStorageMode(env);
   const displayName = makeOwnerName(payload.displayName);
   const expiresAt = Date.now() + LOCK_TTL_MS;
 
@@ -343,7 +347,7 @@ export async function heartbeat(env, payload) {
     return null;
   }
 
-  const storageMode = requireStorage(env);
+  const storageMode = getStorageMode(env);
   const displayName = makeOwnerName(payload.displayName);
   const expiresAt = Date.now() + LOCK_TTL_MS;
 
@@ -383,7 +387,7 @@ export async function saveDocument(env, payload) {
     return null;
   }
 
-  const storageMode = requireStorage(env);
+  const storageMode = getStorageMode(env);
   const content = sanitizeDocument(payload.document);
   const displayName = makeOwnerName(payload.displayName);
   const updatedAt = nowIso();
@@ -429,7 +433,7 @@ export async function releaseLock(env, payload) {
     return null;
   }
 
-  const storageMode = requireStorage(env);
+  const storageMode = getStorageMode(env);
 
   if (storageMode === "d1") {
     await ensureSchema(env.DB);
