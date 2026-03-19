@@ -1,0 +1,5 @@
+node_modules/
+.wrangler/
+.DS_Store
+output/playwright/*
+!output/playwright/.gitkeep
