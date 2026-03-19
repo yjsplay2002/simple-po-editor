@@ -2,21 +2,20 @@ const LOCK_TTL_MS = 90_000;
 const MEMORY_STORE_KEY = Symbol.for("simple-po-editor.memory");
 const SCHEMA_READY_KEY = Symbol.for("simple-po-editor.schema-ready");
 
-const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS documents (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  content_json TEXT NOT NULL,
-  version INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  lock_owner_id TEXT,
-  lock_owner_name TEXT,
-  lock_expires_at INTEGER
-);
-
-CREATE INDEX IF NOT EXISTS idx_documents_updated_at ON documents(updated_at);
-`;
+const SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS documents (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    lock_owner_id TEXT,
+    lock_owner_name TEXT,
+    lock_expires_at INTEGER
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_documents_updated_at ON documents(updated_at)"
+];
 
 export class StorageConfigError extends Error {
   constructor(message = "Persistent storage is not configured.") {
@@ -138,7 +137,9 @@ function shapeResponse(document, sessionId, storageMode) {
 
 async function ensureSchema(db) {
   if (!globalThis[SCHEMA_READY_KEY]) {
-    await db.exec(SCHEMA_SQL);
+    for (const statement of SCHEMA_STATEMENTS) {
+      await db.prepare(statement).run();
+    }
     globalThis[SCHEMA_READY_KEY] = true;
   }
 }

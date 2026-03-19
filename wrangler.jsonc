@@ -2,5 +2,12 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "simple-po-editor",
   "compatibility_date": "2026-03-19",
-  "pages_build_output_dir": "."
+  "pages_build_output_dir": ".",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "simple-po-editor-db",
+      "database_id": "bf2f26fc-567f-46b5-b721-6808d855030f"
+    }
+  ]
 }
