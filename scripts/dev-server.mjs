@@ -85,7 +85,9 @@ async function handleApi(nodeRequest, nodeResponse, pathname) {
   });
 
   const response = await handler({
-    env: {},
+    env: {
+      ALLOW_MEMORY_STORE: true
+    },
     request
   });
 

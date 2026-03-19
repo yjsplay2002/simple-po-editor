@@ -8,7 +8,7 @@ Simple PO Editor is a browser-based `.po` file editor for small teams that want 
 - Show one active editor lock at a time, with read-only fallback for everyone else
 - Keep document data in the app backend, then export back to `.po`
 - Work locally with no cloud setup through the included in-memory dev server
-- Deploy to Cloudflare Pages Functions later and back the app with D1 for real persistence
+- Deploy to Cloudflare Pages Functions and back the app with D1 for real persistence
 
 ## Local run
 
@@ -22,17 +22,24 @@ Notes:
 
 - Local dev uses an in-memory store, so data resets when the dev server restarts.
 - The API shape already matches the Cloudflare Functions deployment path.
+- Production-style deployments must provide a D1 binding named `DB`.
 
 ## Cloudflare Pages deployment
 
-1. Push this repo to GitHub.
-2. Create a Cloudflare Pages project from this repository.
-3. Leave the build command blank.
-4. Use the repository root as the build output directory.
-5. Add a D1 binding named `DB`.
-6. Apply [`schema.sql`](./schema.sql) to that D1 database.
+Follow the detailed guide in [`docs/cloudflare-pages-setup.md`](./docs/cloudflare-pages-setup.md).
 
-After the `DB` binding exists, the Functions switch from memory mode to durable D1 storage automatically.
+Short version:
+
+1. Create a D1 database in Cloudflare.
+2. Apply [`schema.sql`](./schema.sql) or [`migrations/0001_initial.sql`](./migrations/0001_initial.sql).
+3. Create a Cloudflare Pages project from this repository.
+4. Leave the build command blank.
+5. Set the build output directory to `.`.
+6. Add a D1 binding named `DB`.
+7. Redeploy.
+
+After the `DB` binding exists, the Functions use durable D1 storage automatically.
+Without `DB`, deployed Functions return a configuration error on purpose so team data is not silently lost.
 
 ## Locking behavior
 

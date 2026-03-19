@@ -18,8 +18,19 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE INDEX IF NOT EXISTS idx_documents_updated_at ON documents(updated_at);
 `;
 
+export class StorageConfigError extends Error {
+  constructor(message = "Persistent storage is not configured.") {
+    super(message);
+    this.name = "StorageConfigError";
+  }
+}
+
 function nowIso() {
   return new Date().toISOString();
+}
+
+function allowMemoryStore(env) {
+  return env?.ALLOW_MEMORY_STORE === true || env?.ALLOW_MEMORY_STORE === "true";
 }
 
 function memoryStore() {
@@ -198,7 +209,20 @@ async function getD1Document(db, id) {
   };
 }
 
+function requireStorage(env) {
+  if (env?.DB) {
+    return "d1";
+  }
+
+  if (allowMemoryStore(env)) {
+    return "memory";
+  }
+
+  throw new StorageConfigError("Persistent storage is not configured. Add a D1 binding named DB before using this deployment.");
+}
+
 export async function createDocument(env, payload) {
+  const storageMode = requireStorage(env);
   const content = sanitizeDocument(payload.document);
   const id = createId();
   const createdAt = nowIso();
@@ -215,7 +239,7 @@ export async function createDocument(env, payload) {
     lockExpiresAt
   };
 
-  if (env?.DB) {
+  if (storageMode === "d1") {
     await ensureSchema(env.DB);
     await env.DB
       .prepare(
@@ -246,7 +270,9 @@ export async function getDocument(env, id, sessionId = "") {
     return null;
   }
 
-  if (env?.DB) {
+  const storageMode = requireStorage(env);
+
+  if (storageMode === "d1") {
     const record = await getD1Document(env.DB, id);
     return record ? shapeResponse(record, sessionId, "d1") : null;
   }
@@ -268,10 +294,11 @@ export async function acquireLock(env, payload) {
     return null;
   }
 
+  const storageMode = requireStorage(env);
   const displayName = makeOwnerName(payload.displayName);
   const expiresAt = Date.now() + LOCK_TTL_MS;
 
-  if (env?.DB) {
+  if (storageMode === "d1") {
     await ensureSchema(env.DB);
     await env.DB
       .prepare(
@@ -315,10 +342,11 @@ export async function heartbeat(env, payload) {
     return null;
   }
 
+  const storageMode = requireStorage(env);
   const displayName = makeOwnerName(payload.displayName);
   const expiresAt = Date.now() + LOCK_TTL_MS;
 
-  if (env?.DB) {
+  if (storageMode === "d1") {
     await ensureSchema(env.DB);
     await env.DB
       .prepare(
@@ -354,13 +382,14 @@ export async function saveDocument(env, payload) {
     return null;
   }
 
+  const storageMode = requireStorage(env);
   const content = sanitizeDocument(payload.document);
   const displayName = makeOwnerName(payload.displayName);
   const updatedAt = nowIso();
   const expiresAt = Date.now() + LOCK_TTL_MS;
   const version = Number(payload.version || 0);
 
-  if (env?.DB) {
+  if (storageMode === "d1") {
     await ensureSchema(env.DB);
     await env.DB
       .prepare(
@@ -399,7 +428,9 @@ export async function releaseLock(env, payload) {
     return null;
   }
 
-  if (env?.DB) {
+  const storageMode = requireStorage(env);
+
+  if (storageMode === "d1") {
     await ensureSchema(env.DB);
     await env.DB
       .prepare(

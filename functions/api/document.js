@@ -1,4 +1,4 @@
-import { getDocument } from "../_lib/store.js";
+import { getDocument, StorageConfigError } from "../_lib/store.js";
 import { error, json, getQueryParam } from "../_lib/http.js";
 
 export async function onRequestGet(context) {
@@ -13,6 +13,10 @@ export async function onRequestGet(context) {
     const response = await getDocument(context.env, id, sessionId);
     return response ? json(response) : error("Document not found.", 404);
   } catch (err) {
+    if (err instanceof StorageConfigError) {
+      return error(err.message, 503);
+    }
+
     return error("Failed to load document.", 500, err instanceof Error ? err.message : String(err));
   }
 }
