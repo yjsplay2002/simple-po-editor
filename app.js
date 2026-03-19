@@ -19,7 +19,6 @@ const state = {
   recentDocs: loadRecentDocs(),
   saving: false,
   search: "",
-  selectedEntryId: "",
   sessionId: loadSessionId(),
   statusFilter: "all",
   storageMode: "checking"
@@ -101,10 +100,6 @@ function isEditing() {
   return Boolean(state.lock?.isActive && state.lock?.isMine);
 }
 
-function truncate(value, length) {
-  return value.length > length ? `${value.slice(0, length - 1)}...` : value;
-}
-
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -125,7 +120,7 @@ function filteredEntries() {
 
   return state.document.entries.filter((entry) => {
     const status = getEntryStatus(entry);
-    const haystack = [entry.msgctxt, entry.msgid, entry.msgidPlural, ...entry.msgstr].join(" ").toLowerCase();
+    const haystack = [entry.msgid, entry.msgidPlural, ...entry.msgstr, ...entry.comments.reference].join(" ").toLowerCase();
 
     if (state.statusFilter !== "all" && status !== state.statusFilter) {
       return false;
@@ -137,26 +132,6 @@ function filteredEntries() {
 
     return haystack.includes(query);
   });
-}
-
-function selectedEntry() {
-  if (!state.document) {
-    return null;
-  }
-
-  const visibleEntries = filteredEntries();
-  const selected = state.document.entries.find((entry) => entry.id === state.selectedEntryId);
-
-  if (selected && visibleEntries.some((entry) => entry.id === selected.id)) {
-    return selected;
-  }
-
-  return visibleEntries[0] || state.document.entries[0] || null;
-}
-
-function ensureSelectedEntry() {
-  const entry = selectedEntry();
-  state.selectedEntryId = entry?.id || "";
 }
 
 async function apiFetch(url, options = {}) {
@@ -194,7 +169,6 @@ function hydrateDocumentFromPayload(payload) {
   state.currentDocId = payload.meta.id;
   state.currentFileName = payload.meta.name;
   state.storageMode = payload.meta.storageMode;
-  ensureSelectedEntry();
   upsertRecentDoc(payload.meta.id, payload.meta.name);
 }
 
@@ -467,20 +441,6 @@ async function saveDocument() {
   }
 }
 
-function updateSelectedEntry(mutator) {
-  const entry = selectedEntry();
-
-  if (!entry || !isEditing()) {
-    return;
-  }
-
-  mutator(entry);
-  state.dirty = true;
-  renderEntryList();
-  renderChrome();
-  renderSelectedEntrySummary();
-}
-
 function copyShareLink() {
   navigator.clipboard
     .writeText(currentDocLink())
@@ -690,36 +650,49 @@ function renderEditorShell() {
       </header>
 
       <div class="editor-grid">
-        <aside class="sidebar">
-          <div class="sidebar-top">
-            <div class="field-group" style="margin-bottom: 0;">
-              <label for="sidebar-display-name">Display name</label>
-              <input id="sidebar-display-name" class="input" maxlength="80" value="${escapeAttribute(state.displayName)}" />
+        <section class="sheet-panel">
+          <div class="sheet-controls">
+            <div class="sheet-controls-top">
+              <div class="field-group" style="margin-bottom: 0;">
+                <label for="sidebar-display-name">Display name</label>
+                <input id="sidebar-display-name" class="input" maxlength="80" value="${escapeAttribute(state.displayName)}" />
+              </div>
+              <div class="field-group" style="margin-bottom: 0;">
+                <label for="search-input">Search</label>
+                <input
+                  id="search-input"
+                  class="search-input"
+                  placeholder="Search original, translation, or references..."
+                  value="${escapeAttribute(state.search)}"
+                />
+              </div>
             </div>
-            <input id="search-input" class="search-input" placeholder="Search msgid, msgctxt, translation..." value="${escapeAttribute(
-              state.search
-            )}" />
-            <div class="filter-row">
-              ${renderFilterButton("all", "All")}
-              ${renderFilterButton("translated", "Translated")}
-              ${renderFilterButton("untranslated", "Untranslated")}
-              ${renderFilterButton("fuzzy", "Fuzzy")}
-            </div>
-          </div>
-          <div id="entry-list" class="sidebar-list"></div>
-        </aside>
 
-        <section class="detail">
-          <div class="detail-head">
-            <div>
-              <h2 id="detail-title">Entry</h2>
-              <p id="detail-subtitle" class="muted"></p>
-            </div>
-            <div class="toolbar-meta">
-              <span id="stats-pill" class="chip mono"></span>
+            <div class="sheet-summary">
+              <div class="filter-row">
+                ${renderFilterButton("all", "All")}
+                ${renderFilterButton("translated", "Translated")}
+                ${renderFilterButton("untranslated", "Untranslated")}
+                ${renderFilterButton("fuzzy", "Fuzzy")}
+              </div>
+              <div class="toolbar-meta">
+                <span id="stats-pill" class="chip mono"></span>
+                <span class="muted">Spreadsheet view with source, translation, and references only.</span>
+              </div>
             </div>
           </div>
-          <div id="detail-grid" class="detail-grid"></div>
+
+          <div class="sheet-wrap">
+            <div class="sheet-table">
+              <div class="sheet-head">
+                <span>Original Text</span>
+                <span>Translation Text</span>
+                <span>References</span>
+              </div>
+              <div id="sheet-body"></div>
+            </div>
+          </div>
+
           <div id="notice"></div>
         </section>
       </div>
@@ -728,17 +701,14 @@ function renderEditorShell() {
 
   refs = {
     copyLinkButton: root.querySelector("#copy-link-button"),
-    detailGrid: root.querySelector("#detail-grid"),
-    detailSubtitle: root.querySelector("#detail-subtitle"),
-    detailTitle: root.querySelector("#detail-title"),
     displayNameInput: root.querySelector("#sidebar-display-name"),
-    entryList: root.querySelector("#entry-list"),
     exportButton: root.querySelector("#export-button"),
     lockBadge: root.querySelector("#lock-badge"),
     notice: root.querySelector("#notice"),
     releaseLockButton: root.querySelector("#release-lock-button"),
     saveButton: root.querySelector("#save-button"),
     searchInput: root.querySelector("#search-input"),
+    sheetBody: root.querySelector("#sheet-body"),
     statsPill: root.querySelector("#stats-pill"),
     takeLockButton: root.querySelector("#take-lock-button"),
     versionValue: root.querySelector("#version-value")
@@ -751,9 +721,7 @@ function renderEditorShell() {
 
   refs.searchInput.addEventListener("input", (event) => {
     state.search = event.target.value;
-    ensureSelectedEntry();
-    renderEntryList();
-    renderEntryEditor();
+    renderSpreadsheet();
   });
 
   refs.copyLinkButton.addEventListener("click", copyShareLink);
@@ -765,9 +733,7 @@ function renderEditorShell() {
   root.querySelectorAll("[data-filter]").forEach((button) => {
     button.addEventListener("click", () => {
       state.statusFilter = button.dataset.filter;
-      ensureSelectedEntry();
-      renderEntryList();
-      renderEntryEditor();
+      renderSpreadsheet();
       root.querySelectorAll("[data-filter]").forEach((target) => {
         target.classList.toggle("is-active", target.dataset.filter === state.statusFilter);
       });
@@ -775,8 +741,7 @@ function renderEditorShell() {
   });
 
   renderChrome();
-  renderEntryList();
-  renderEntryEditor();
+  renderSpreadsheet();
   renderNotice();
 }
 
@@ -798,149 +763,96 @@ function renderChrome() {
   refs.saveButton.textContent = state.saving ? "Saving..." : state.dirty ? "Save changes" : "Saved";
 }
 
-function renderEntryList() {
-  if (!refs.entryList || !state.document) {
+function entryReferenceText(entry) {
+  return entry.comments.reference.join("\n") || "No references";
+}
+
+function sheetRowClass(entry) {
+  return `sheet-row is-${getEntryStatus(entry)}`;
+}
+
+function updateEntryTranslation(entryId, index, value, row) {
+  if (!state.document || !isEditing()) {
     return;
   }
 
-  ensureSelectedEntry();
+  const entry = state.document.entries.find((item) => item.id === entryId);
+
+  if (!entry) {
+    return;
+  }
+
+  entry.msgstr[index] = value;
+  state.dirty = true;
+
+  if (row) {
+    row.className = sheetRowClass(entry);
+  }
+
+  renderChrome();
+}
+
+function renderSpreadsheet() {
+  if (!refs.sheetBody || !state.document) {
+    return;
+  }
+
   const visibleEntries = filteredEntries();
 
   if (visibleEntries.length === 0) {
-    refs.entryList.innerHTML = `
-      <div class="empty-state">
-        <div>
-          <strong>No entries match this filter.</strong>
-          <span class="muted">Try a different search query or switch the status filter.</span>
-        </div>
+    refs.sheetBody.innerHTML = `
+      <div class="sheet-empty">
+        <strong>No entries match this filter.</strong>
+        <span class="muted">Try a different search query or switch the status filter.</span>
       </div>
     `;
     return;
   }
 
-  refs.entryList.innerHTML = visibleEntries
-    .map((entry) => {
-      const status = getEntryStatus(entry);
-      const translationPreview = entry.msgstr.find((value) => value.trim()) || "No translation yet";
-      const flags = entry.comments.flag.length ? entry.comments.flag.join(", ") : status;
+  refs.sheetBody.innerHTML = visibleEntries
+    .map((entry, rowIndex) => {
+      const translationFields = entry.msgstr
+        .map(
+          (value, index) => `
+            <div class="sheet-field">
+              <label class="sheet-field-label" for="msgstr-${rowIndex}-${index}">
+                ${entry.msgidPlural || entry.msgstr.length > 1 ? `Plural form ${index}` : "Translation"}
+              </label>
+              <textarea
+                id="msgstr-${rowIndex}-${index}"
+                class="textarea sheet-textarea"
+                data-entry-id="${escapeAttribute(entry.id)}"
+                data-msgstr-index="${index}"
+                ${!isEditing() ? "readonly" : ""}
+              >${escapeHtml(value)}</textarea>
+            </div>
+          `
+        )
+        .join("");
+
       return `
-        <button class="entry-item is-${status} ${entry.id === state.selectedEntryId ? "is-selected" : ""}" data-entry-id="${entry.id}">
-          <strong>${escapeHtml(entry.msgid || "(header)")}</strong>
-          <div class="entry-meta">
-            ${entry.msgctxt ? `<span class="mono">${escapeHtml(entry.msgctxt)}</span>` : ""}
-            <span>${escapeHtml(flags)}</span>
+        <div class="${sheetRowClass(entry)}">
+          <div class="sheet-cell" data-col="Original Text">
+            <div class="sheet-source">${escapeHtml(entry.msgid || "(empty msgid)")}</div>
+            ${entry.msgidPlural ? `<div class="sheet-subcopy">Plural: ${escapeHtml(entry.msgidPlural)}</div>` : ""}
           </div>
-          <span class="muted">${escapeHtml(truncate(translationPreview, 84))}</span>
-        </button>
+          <div class="sheet-cell" data-col="Translation Text">
+            <div class="sheet-translation-stack">${translationFields}</div>
+          </div>
+          <div class="sheet-cell" data-col="References">
+            <div class="sheet-reference ${entry.comments.reference.length ? "" : "is-empty"}">${escapeHtml(entryReferenceText(entry))}</div>
+          </div>
+        </div>
       `;
     })
     .join("");
 
-  refs.entryList.querySelectorAll("[data-entry-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.selectedEntryId = button.dataset.entryId;
-      renderEntryList();
-      renderEntryEditor();
-    });
-  });
-}
-
-function renderMetaBlock(label, value) {
-  return `
-    <div class="meta-block">
-      <strong class="meta-label">${escapeHtml(label)}</strong>
-      <div class="source-copy">${escapeHtml(value)}</div>
-    </div>
-  `;
-}
-
-function renderEntryEditor() {
-  if (!refs.detailGrid || !state.document) {
-    return;
-  }
-
-  const entry = selectedEntry();
-
-  if (!entry) {
-    refs.detailTitle.textContent = "No entry selected";
-    refs.detailSubtitle.textContent = "";
-    refs.detailGrid.innerHTML = `
-      <div class="empty-state">
-        <div>
-          <strong>Select a translation row.</strong>
-          <span class="muted">The details panel shows source text, translation, and comments.</span>
-        </div>
-      </div>
-    `;
-    return;
-  }
-
-  state.selectedEntryId = entry.id;
-  const translationInputs = entry.msgstr
-    .map(
-      (value, index) => `
-        <div class="translation-group">
-          <label for="msgstr-${index}">${entry.msgidPlural ? `Plural form ${index}` : "Translation"}</label>
-          <textarea id="msgstr-${index}" class="textarea" data-msgstr-index="${index}" ${!isEditing() ? "readonly" : ""}>${escapeHtml(
-            value
-          )}</textarea>
-        </div>
-      `
-    )
-    .join("");
-
-  refs.detailTitle.textContent = entry.msgid || "Header";
-  renderSelectedEntrySummary();
-  refs.detailGrid.innerHTML = `
-    <div class="detail-card">
-      <h3>Source text</h3>
-      <div class="source-copy">${escapeHtml(entry.msgid || "(empty msgid)")}</div>
-      ${entry.msgidPlural ? `<div class="source-copy muted" style="margin-top: 12px;">Plural: ${escapeHtml(entry.msgidPlural)}</div>` : ""}
-    </div>
-    <div class="detail-card">
-      <h3>Translation</h3>
-      <div class="translation-group">
-        ${translationInputs}
-      </div>
-    </div>
-    <div class="detail-card">
-      <h3>Entry metadata</h3>
-      <div class="meta-list">
-        ${renderMetaBlock("Context", entry.msgctxt || "No context")}
-        ${renderMetaBlock("References", entry.comments.reference.join("\n") || "No references")}
-        ${renderMetaBlock("Flags", entry.comments.flag.join("\n") || "No flags")}
-        ${renderMetaBlock("Translator comments", entry.comments.translator.join("\n") || "No translator comments")}
-        ${renderMetaBlock("Extracted comments", entry.comments.extracted.join("\n") || "No extracted comments")}
-      </div>
-    </div>
-  `;
-
-  refs.detailGrid.querySelectorAll("[data-msgstr-index]").forEach((textarea) => {
+  refs.sheetBody.querySelectorAll("[data-entry-id][data-msgstr-index]").forEach((textarea) => {
     textarea.addEventListener("input", () => {
-      const index = Number(textarea.dataset.msgstrIndex);
-      updateSelectedEntry((target) => {
-        target.msgstr[index] = textarea.value;
-      });
+      const row = textarea.closest(".sheet-row");
+      updateEntryTranslation(textarea.dataset.entryId, Number(textarea.dataset.msgstrIndex), textarea.value, row);
     });
   });
-}
-
-function renderSelectedEntrySummary() {
-  if (!refs.detailTitle || !refs.detailSubtitle) {
-    return;
-  }
-
-  const entry = selectedEntry();
-
-  if (!entry) {
-    refs.detailTitle.textContent = "No entry selected";
-    refs.detailSubtitle.textContent = "";
-    return;
-  }
-
-  const status = getEntryStatus(entry);
-  refs.detailTitle.textContent = entry.msgid || "Header";
-  refs.detailSubtitle.textContent = `${status.toUpperCase()}${entry.msgctxt ? ` / ${entry.msgctxt}` : ""}`;
 }
 
 function render() {

@@ -14,7 +14,8 @@ const apiModules = {
   "/api/lock": "./functions/api/lock.js",
   "/api/heartbeat": "./functions/api/heartbeat.js",
   "/api/save": "./functions/api/save.js",
-  "/api/release": "./functions/api/release.js"
+  "/api/release": "./functions/api/release.js",
+  "/api/status": "./functions/api/status.js"
 };
 
 const mimeTypes = {
