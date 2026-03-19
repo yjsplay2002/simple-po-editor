@@ -1,0 +1,6 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "simple-po-editor",
+  "compatibility_date": "2026-03-19",
+  "pages_build_output_dir": "."
+}

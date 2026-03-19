@@ -4,9 +4,18 @@ This project is designed to run on Cloudflare Pages with Pages Functions and a D
 
 ## Before you deploy
 
+0. Authenticate Wrangler:
+   - `npx wrangler login`
 1. Create a D1 database in Cloudflare.
 2. Open the SQL console for that database.
 3. Run the contents of [`schema.sql`](../schema.sql) or [`migrations/0001_initial.sql`](../migrations/0001_initial.sql).
+
+If you prefer the CLI, you can create the database from this repo after login:
+
+```bash
+npx wrangler d1 create simple-po-editor-db --binding DB --update-config
+npx wrangler d1 execute simple-po-editor-db --remote --file=./schema.sql
+```
 
 ## Create the Pages project
 
@@ -38,3 +47,17 @@ This project is designed to run on Cloudflare Pages with Pages Functions and a D
 ## Important safety note
 
 This app only allows in-memory storage during local development. If you deploy it without the `DB` binding, the API will return a storage configuration error instead of pretending to save team data.
+
+## Optional CLI deploy flow
+
+If you do not want to use Git integration yet, you can deploy directly after login:
+
+```bash
+npm run cf:deploy
+```
+
+For Pages-style local development:
+
+```bash
+npm run cf:dev
+```
