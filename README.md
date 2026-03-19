@@ -41,6 +41,18 @@ Short version:
 After the `DB` binding exists, the Functions use durable D1 storage automatically.
 Without `DB`, deployed Functions return a configuration error on purpose so team data is not silently lost.
 
+## GitHub auto deploy
+
+Pushes to `main` can redeploy automatically through GitHub Actions using
+[`/.github/workflows/pages-deployment.yml`](./.github/workflows/pages-deployment.yml).
+
+Add these repository secrets before relying on the workflow:
+
+1. `CLOUDFLARE_ACCOUNT_ID`
+2. `CLOUDFLARE_API_TOKEN`
+
+The API token should have `Account / Cloudflare Pages / Edit` permission.
+
 ## Locking behavior
 
 - No sign-in is required.
