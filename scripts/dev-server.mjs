@@ -15,6 +15,8 @@ const apiModules = {
   "/api/heartbeat": "./functions/api/heartbeat.js",
   "/api/save": "./functions/api/save.js",
   "/api/release": "./functions/api/release.js",
+  "/api/delete": "./functions/api/delete.js",
+  "/api/export": "./functions/api/export.js",
   "/api/status": "./functions/api/status.js"
 };
 

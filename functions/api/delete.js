@@ -1,15 +1,15 @@
-import { DocumentPasswordError, saveDocument, StorageConfigError } from "../_lib/store.js";
+import { deleteDocument, DocumentPasswordError, StorageConfigError } from "../_lib/store.js";
 import { error, json, readJson } from "../_lib/http.js";
 
 export async function onRequestPost(context) {
   const body = await readJson(context.request);
 
-  if (!body?.id || !body?.sessionId || !body?.document) {
-    return error("Missing save payload.");
+  if (!body?.id || !body?.password) {
+    return error("Missing delete payload.");
   }
 
   try {
-    const response = await saveDocument(context.env, body);
+    const response = await deleteDocument(context.env, body);
     return response ? json(response) : error("Document not found.", 404);
   } catch (err) {
     if (err instanceof DocumentPasswordError) {
@@ -20,6 +20,6 @@ export async function onRequestPost(context) {
       return error(err.message, 503);
     }
 
-    return error("Failed to save document.", 500, err instanceof Error ? err.message : String(err));
+    return error("Failed to delete document.", 500, err instanceof Error ? err.message : String(err));
   }
 }

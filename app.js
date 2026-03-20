@@ -1,4 +1,4 @@
-import { compilePo, getEntryStatus, parsePo, summarizeEntries } from "./po.js";
+import { getEntryStatus, parsePo, summarizeEntries } from "./po.js";
 
 const STORAGE_KEYS = {
   displayName: "simple-po-editor.display-name",
@@ -12,6 +12,8 @@ const state = {
   dirty: false,
   displayName: loadDisplayName(),
   document: null,
+  documentPassword: "3757",
+  deleting: false,
   loading: false,
   lock: null,
   message: null,
@@ -62,6 +64,11 @@ function saveDisplayName() {
   localStorage.setItem(STORAGE_KEYS.displayName, state.displayName.trim());
 }
 
+function removeRecentDoc(id) {
+  state.recentDocs = state.recentDocs.filter((entry) => entry.id !== id);
+  saveRecentDocs();
+}
+
 function setMessage(kind, text) {
   state.message = text ? { kind, text } : null;
   renderNotice();
@@ -69,6 +76,12 @@ function setMessage(kind, text) {
 
 function currentDocLink(id = state.currentDocId) {
   return `${window.location.origin}${window.location.pathname}#/d/${id}`;
+}
+
+function goHome() {
+  clearDocumentState();
+  setRoute("");
+  render();
 }
 
 function parseRoute() {
@@ -82,6 +95,21 @@ function setRoute(id) {
 
 function defaultDisplayName() {
   return state.displayName.trim() || `Editor ${state.sessionId.slice(0, 4)}`;
+}
+
+function requestDocumentPassword(action) {
+  const password = window.prompt(`${action}\nEnter the document password.`);
+
+  if (password === null) {
+    return null;
+  }
+
+  if (!password.trim()) {
+    setMessage("warning", "Document password is required.");
+    return null;
+  }
+
+  return password;
 }
 
 function storageSummary() {
@@ -185,6 +213,7 @@ function clearDocumentState() {
   cleanupTimers();
   state.currentDocId = "";
   state.currentFileName = "";
+  state.deleting = false;
   state.document = null;
   state.lock = null;
   state.meta = null;
@@ -247,6 +276,7 @@ async function createFromPoFile(file) {
         displayName: defaultDisplayName(),
         document: parsed,
         name: file.name.replace(/\.po$/i, "") || "Untitled translation",
+        password: state.documentPassword,
         sessionId: state.sessionId
       })
     });
@@ -394,21 +424,56 @@ function scheduleTimers() {
 }
 
 function downloadCurrentPo() {
-  if (!state.document) {
+  if (!state.document || !state.currentDocId) {
     return;
   }
 
-  const blob = new Blob([compilePo(state.document)], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `${state.currentFileName || "translations"}.po`;
-  anchor.click();
-  URL.revokeObjectURL(url);
+  const password = requestDocumentPassword(`Download "${state.currentFileName}".`);
+
+  if (!password) {
+    return;
+  }
+
+  fetch("/api/export", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      id: state.currentDocId,
+      password
+    })
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || `Request failed with ${response.status}`);
+      }
+
+      const text = await response.text();
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${state.currentFileName || "translations"}.po`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setMessage("success", "Download started.");
+    })
+    .catch((err) => {
+      setMessage("warning", err instanceof Error ? err.message : String(err));
+      renderNotice();
+    });
 }
 
 async function saveDocument() {
   if (!state.document || !state.currentDocId || !isEditing()) {
+    return;
+  }
+
+  const password = requestDocumentPassword(`Save changes to "${state.currentFileName}".`);
+
+  if (!password) {
     return;
   }
 
@@ -422,6 +487,7 @@ async function saveDocument() {
         displayName: defaultDisplayName(),
         document: state.document,
         id: state.currentDocId,
+        password,
         sessionId: state.sessionId,
         version: state.meta?.version || 0
       })
@@ -437,6 +503,51 @@ async function saveDocument() {
     renderNotice();
   } finally {
     state.saving = false;
+    renderChrome();
+  }
+}
+
+async function deleteCurrentDocument() {
+  if (!state.currentDocId || state.deleting) {
+    return;
+  }
+
+  const password = requestDocumentPassword(`Delete "${state.currentFileName}" permanently.`);
+
+  if (!password) {
+    return;
+  }
+
+  const confirmed = window.confirm(`"${state.currentFileName}" will be removed permanently. Continue?`);
+
+  if (!confirmed) {
+    return;
+  }
+
+  const deletedId = state.currentDocId;
+  const deletedName = state.currentFileName || "Untitled translation";
+  state.deleting = true;
+  renderChrome();
+
+  try {
+    const payload = await apiFetch("/api/delete", {
+      method: "POST",
+      body: JSON.stringify({
+        id: deletedId,
+        password
+      })
+    });
+
+    removeRecentDoc(deletedId);
+    clearDocumentState();
+    setRoute("");
+    render();
+    setMessage("success", `"${payload.deletedName || deletedName}" was deleted.`);
+  } catch (err) {
+    setMessage("warning", err instanceof Error ? err.message : String(err));
+    renderNotice();
+  } finally {
+    state.deleting = false;
     renderChrome();
   }
 }
@@ -530,6 +641,16 @@ function renderHome() {
               placeholder="For example: Mina, Lucas, QA desk"
             />
           </div>
+          <div class="field-group">
+            <label for="document-password-input">Document password</label>
+            <input
+              id="document-password-input"
+              class="input"
+              type="password"
+              value="${escapeAttribute(state.documentPassword)}"
+              placeholder="Set the password used for save, download, and delete"
+            />
+          </div>
           <input id="file-input" class="visually-hidden" type="file" accept=".po,text/plain" />
           <button id="choose-file-button" class="button button-primary" ${state.loading ? "disabled" : ""}>
             ${state.loading ? "Importing..." : "Choose .po file"}
@@ -564,6 +685,7 @@ function renderHome() {
   refs = {
     chooseFileButton: root.querySelector("#choose-file-button"),
     displayNameInput: root.querySelector("#display-name-input"),
+    documentPasswordInput: root.querySelector("#document-password-input"),
     dropZone: root.querySelector("#drop-zone"),
     fileInput: root.querySelector("#file-input"),
     notice: root.querySelector("#notice")
@@ -572,6 +694,10 @@ function renderHome() {
   refs.displayNameInput.addEventListener("input", (event) => {
     state.displayName = event.target.value;
     saveDisplayName();
+  });
+
+  refs.documentPasswordInput.addEventListener("input", (event) => {
+    state.documentPassword = event.target.value;
   });
 
   refs.chooseFileButton.addEventListener("click", () => refs.fileInput.click());
@@ -641,9 +767,11 @@ function renderEditorShell() {
           <p>Share this URL with the team. One person edits, everyone else stays read-only until the lock is free.</p>
         </div>
         <div class="toolbar-actions">
+          <button id="home-button" class="button button-ghost">Home</button>
           <button id="copy-link-button" class="button button-ghost">Copy share link</button>
           <button id="take-lock-button" class="button button-primary">${isEditing() ? "You are editing" : "Take editing lock"}</button>
           <button id="release-lock-button" class="button button-danger">Release lock</button>
+          <button id="delete-button" class="button button-danger">${state.deleting ? "Deleting..." : "Delete file"}</button>
           <button id="export-button" class="button button-ghost">Export .po</button>
           <button id="save-button" class="button button-primary">Save changes</button>
         </div>
@@ -701,8 +829,10 @@ function renderEditorShell() {
 
   refs = {
     copyLinkButton: root.querySelector("#copy-link-button"),
+    deleteButton: root.querySelector("#delete-button"),
     displayNameInput: root.querySelector("#sidebar-display-name"),
     exportButton: root.querySelector("#export-button"),
+    homeButton: root.querySelector("#home-button"),
     lockBadge: root.querySelector("#lock-badge"),
     notice: root.querySelector("#notice"),
     releaseLockButton: root.querySelector("#release-lock-button"),
@@ -724,7 +854,9 @@ function renderEditorShell() {
     renderSpreadsheet();
   });
 
+  refs.homeButton.addEventListener("click", goHome);
   refs.copyLinkButton.addEventListener("click", copyShareLink);
+  refs.deleteButton.addEventListener("click", deleteCurrentDocument);
   refs.takeLockButton.addEventListener("click", requestLock);
   refs.releaseLockButton.addEventListener("click", releaseLock);
   refs.exportButton.addEventListener("click", downloadCurrentPo);
@@ -756,10 +888,15 @@ function renderChrome() {
   refs.lockBadge.className = `status-pill ${isEditing() ? "is-editing" : "is-readonly"}`;
   refs.statsPill.textContent = `${summary.translated}/${summary.total} translated`;
   refs.versionValue.textContent = `v${state.meta.version}`;
-  refs.takeLockButton.disabled = isEditing() || Boolean(state.lock?.isActive && !state.lock?.isMine);
+  refs.homeButton.disabled = state.deleting || state.saving;
+  refs.copyLinkButton.disabled = state.deleting;
+  refs.deleteButton.disabled = state.deleting || state.saving;
+  refs.deleteButton.textContent = state.deleting ? "Deleting..." : "Delete file";
+  refs.exportButton.disabled = state.deleting;
+  refs.takeLockButton.disabled = state.deleting || isEditing() || Boolean(state.lock?.isActive && !state.lock?.isMine);
   refs.takeLockButton.textContent = isEditing() ? "You are editing" : "Take editing lock";
-  refs.releaseLockButton.disabled = !isEditing();
-  refs.saveButton.disabled = !isEditing() || !state.dirty || state.saving;
+  refs.releaseLockButton.disabled = state.deleting || !isEditing();
+  refs.saveButton.disabled = state.deleting || !isEditing() || !state.dirty || state.saving;
   refs.saveButton.textContent = state.saving ? "Saving..." : state.dirty ? "Save changes" : "Saved";
 }
 

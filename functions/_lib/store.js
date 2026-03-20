@@ -1,4 +1,6 @@
 const LOCK_TTL_MS = 90_000;
+const DEFAULT_DOCUMENT_PASSWORD = "3757";
+const DEFAULT_PASSWORD_HASH_KEY = Symbol.for("simple-po-editor.default-password-hash");
 const MEMORY_STORE_KEY = Symbol.for("simple-po-editor.memory");
 const SCHEMA_READY_KEY = Symbol.for("simple-po-editor.schema-ready");
 
@@ -7,6 +9,7 @@ const SCHEMA_STATEMENTS = [
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     content_json TEXT NOT NULL,
+    password_hash TEXT,
     version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -17,10 +20,19 @@ const SCHEMA_STATEMENTS = [
   "CREATE INDEX IF NOT EXISTS idx_documents_updated_at ON documents(updated_at)"
 ];
 
+const SCHEMA_MIGRATIONS = ["ALTER TABLE documents ADD COLUMN password_hash TEXT"];
+
 export class StorageConfigError extends Error {
   constructor(message = "Persistent storage is not configured.") {
     super(message);
     this.name = "StorageConfigError";
+  }
+}
+
+export class DocumentPasswordError extends Error {
+  constructor(message = "Document password is incorrect.") {
+    super(message);
+    this.name = "DocumentPasswordError";
   }
 }
 
@@ -53,6 +65,10 @@ function cleanCommentList(value) {
         .filter(Boolean)
         .slice(0, 24)
     : [];
+}
+
+function isIgnorableSchemaError(err) {
+  return err instanceof Error && /duplicate column name/i.test(err.message);
 }
 
 function sanitizeEntry(entry, index) {
@@ -140,6 +156,17 @@ async function ensureSchema(db) {
     for (const statement of SCHEMA_STATEMENTS) {
       await db.prepare(statement).run();
     }
+
+    for (const statement of SCHEMA_MIGRATIONS) {
+      try {
+        await db.prepare(statement).run();
+      } catch (err) {
+        if (!isIgnorableSchemaError(err)) {
+          throw err;
+        }
+      }
+    }
+
     globalThis[SCHEMA_READY_KEY] = true;
   }
 }
@@ -158,6 +185,46 @@ function makeOwnerName(name) {
   return trimmed || "Anonymous editor";
 }
 
+function normalizeDocumentPassword(password) {
+  const trimmed = cleanString(password, 120).trim();
+  return trimmed || DEFAULT_DOCUMENT_PASSWORD;
+}
+
+async function hashPassword(password) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(password));
+  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function defaultPasswordHash() {
+  if (!globalThis[DEFAULT_PASSWORD_HASH_KEY]) {
+    globalThis[DEFAULT_PASSWORD_HASH_KEY] = hashPassword(DEFAULT_DOCUMENT_PASSWORD);
+  }
+
+  return globalThis[DEFAULT_PASSWORD_HASH_KEY];
+}
+
+async function makeStoredPasswordHash(password) {
+  return hashPassword(normalizeDocumentPassword(password));
+}
+
+async function getResolvedPasswordHash(record) {
+  return record.passwordHash || (await defaultPasswordHash());
+}
+
+async function assertDocumentPassword(record, password) {
+  const provided = cleanString(password, 120).trim();
+
+  if (!provided) {
+    throw new DocumentPasswordError("Document password is required.");
+  }
+
+  const [expectedHash, providedHash] = await Promise.all([getResolvedPasswordHash(record), hashPassword(provided)]);
+
+  if (expectedHash !== providedHash) {
+    throw new DocumentPasswordError();
+  }
+}
+
 function hydrateMemoryDocument(record) {
   const now = Date.now();
 
@@ -174,7 +241,7 @@ async function getD1Document(db, id) {
   await ensureSchema(db);
   const row = await db
     .prepare(
-      "SELECT id, name, content_json, version, created_at, updated_at, lock_owner_id, lock_owner_name, lock_expires_at FROM documents WHERE id = ?"
+      "SELECT id, name, content_json, password_hash, version, created_at, updated_at, lock_owner_id, lock_owner_name, lock_expires_at FROM documents WHERE id = ?"
     )
     .bind(id)
     .first();
@@ -201,12 +268,31 @@ async function getD1Document(db, id) {
     id: row.id,
     name: row.name,
     content: JSON.parse(row.content_json),
+    passwordHash: row.password_hash || null,
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lockOwnerId: row.lock_owner_id,
     lockOwnerName: row.lock_owner_name,
     lockExpiresAt: row.lock_expires_at
+  };
+}
+
+async function loadStoredDocument(env, id) {
+  const storageMode = getStorageMode(env);
+
+  if (storageMode === "d1") {
+    return {
+      storageMode,
+      record: await getD1Document(env.DB, id)
+    };
+  }
+
+  const record = memoryStore().documents.get(id);
+
+  return {
+    storageMode,
+    record: record ? hydrateMemoryDocument(record) : null
   };
 }
 
@@ -232,10 +318,12 @@ export async function createDocument(env, payload) {
   const id = createId();
   const createdAt = nowIso();
   const lockExpiresAt = Date.now() + LOCK_TTL_MS;
+  const passwordHash = await makeStoredPasswordHash(payload.password);
   const record = {
     id,
     name: makeName(payload.name),
     content,
+    passwordHash,
     version: 1,
     createdAt,
     updatedAt: createdAt,
@@ -248,12 +336,13 @@ export async function createDocument(env, payload) {
     await ensureSchema(env.DB);
     await env.DB
       .prepare(
-        "INSERT INTO documents (id, name, content_json, version, created_at, updated_at, lock_owner_id, lock_owner_name, lock_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO documents (id, name, content_json, password_hash, version, created_at, updated_at, lock_owner_id, lock_owner_name, lock_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       )
       .bind(
         record.id,
         record.name,
         JSON.stringify(record.content),
+        record.passwordHash,
         record.version,
         record.createdAt,
         record.updatedAt,
@@ -275,20 +364,13 @@ export async function getDocument(env, id, sessionId = "") {
     return null;
   }
 
-  const storageMode = getStorageMode(env);
-
-  if (storageMode === "d1") {
-    const record = await getD1Document(env.DB, id);
-    return record ? shapeResponse(record, sessionId, "d1") : null;
-  }
-
-  const record = memoryStore().documents.get(id);
+  const { record, storageMode } = await loadStoredDocument(env, id);
 
   if (!record) {
     return null;
   }
 
-  return shapeResponse(hydrateMemoryDocument(record), sessionId, "memory");
+  return shapeResponse(record, sessionId, storageMode);
 }
 
 export async function acquireLock(env, payload) {
@@ -393,6 +475,13 @@ export async function saveDocument(env, payload) {
   const updatedAt = nowIso();
   const expiresAt = Date.now() + LOCK_TTL_MS;
   const version = Number(payload.version || 0);
+  const currentRecord = await loadStoredDocument(env, id);
+
+  if (!currentRecord.record) {
+    return null;
+  }
+
+  await assertDocumentPassword(currentRecord.record, payload.password);
 
   if (storageMode === "d1") {
     await ensureSchema(env.DB);
@@ -462,4 +551,63 @@ export async function releaseLock(env, payload) {
   }
 
   return shapeResponse(record, sessionId, "memory");
+}
+
+export async function deleteDocument(env, payload) {
+  const id = cleanString(payload?.id, 120);
+
+  if (!id) {
+    return null;
+  }
+
+  const { record, storageMode } = await loadStoredDocument(env, id);
+
+  if (!record) {
+    return null;
+  }
+
+  await assertDocumentPassword(record, payload?.password);
+
+  if (storageMode === "d1") {
+    await env.DB.prepare("DELETE FROM documents WHERE id = ?").bind(id).run();
+
+    return {
+      ok: true,
+      deletedId: id,
+      deletedName: record.name,
+      storageMode: "d1"
+    };
+  }
+
+  memoryStore().documents.delete(id);
+
+  return {
+    ok: true,
+    deletedId: id,
+    deletedName: record.name,
+    storageMode: "memory"
+  };
+}
+
+export async function getProtectedDocument(env, payload) {
+  const id = cleanString(payload?.id, 120);
+
+  if (!id) {
+    return null;
+  }
+
+  const { record, storageMode } = await loadStoredDocument(env, id);
+
+  if (!record) {
+    return null;
+  }
+
+  await assertDocumentPassword(record, payload?.password);
+
+  return {
+    id: record.id,
+    name: record.name,
+    document: sanitizeDocument(record.content),
+    storageMode
+  };
 }
