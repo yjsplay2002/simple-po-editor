@@ -12,6 +12,7 @@ const apiModules = {
   "/api/create": "./functions/api/create.js",
   "/api/documents": "./functions/api/documents.js",
   "/api/document": "./functions/api/document.js",
+  "/api/entry-save": "./functions/api/entry-save.js",
   "/api/lock": "./functions/api/lock.js",
   "/api/heartbeat": "./functions/api/heartbeat.js",
   "/api/save": "./functions/api/save.js",

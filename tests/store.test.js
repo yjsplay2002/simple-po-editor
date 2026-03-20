@@ -6,6 +6,7 @@ import {
   DocumentPasswordError,
   getDocument,
   listDocuments,
+  saveEntry,
   StorageConfigError
 } from "../functions/_lib/store.js";
 
@@ -172,4 +173,38 @@ test("listDocuments returns shared summaries in updated order", async () => {
   assert.equal(listed.documents[0].lock.isActive, true);
   assert.equal(listed.documents[0].lock.isMine, false);
   assert.equal(listed.documents[0].document, undefined);
+});
+
+test("saveEntry updates one row without replacing sibling rows", async () => {
+  const env = { ALLOW_MEMORY_STORE: true };
+  const created = await createDocument(env, {
+    ...makeDocumentPayload(),
+    document: {
+      ...makeDocumentPayload().document,
+      entries: [
+        makeDocumentPayload().document.entries[0],
+        {
+          ...makeDocumentPayload().document.entries[0],
+          id: "entry-2",
+          msgid: "Goodbye"
+        }
+      ]
+    }
+  });
+
+  const response = await saveEntry(env, {
+    id: created.meta.id,
+    entryId: "entry-1",
+    msgstr: ["안녕"],
+    password: "3757",
+    displayName: "Mina"
+  });
+  const loaded = await getDocument(env, created.meta.id, "session-1");
+
+  assert.equal(response?.meta.version, 2);
+  assert.equal(response?.entry.msgstr[0], "안녕");
+  assert.equal(response?.entry.revision, 1);
+  assert.equal(response?.entry.lastEditorName, "Mina");
+  assert.equal(loaded?.document.entries[0].msgstr[0], "안녕");
+  assert.equal(loaded?.document.entries[1].msgstr[0], "");
 });

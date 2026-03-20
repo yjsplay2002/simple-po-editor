@@ -603,6 +603,25 @@ a {
   gap: 12px;
 }
 
+.sheet-row-status {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.sheet-row-status.is-saving {
+  color: var(--teal);
+}
+
+.sheet-row-status.is-pending {
+  color: var(--accent-strong);
+}
+
+.sheet-row-status.is-error {
+  color: var(--danger);
+}
+
 .sheet-field {
   display: grid;
   gap: 8px;

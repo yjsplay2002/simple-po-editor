@@ -87,7 +87,10 @@ function sanitizeEntry(entry, index) {
       flag: cleanCommentList(entry?.comments?.flag),
       previous: cleanCommentList(entry?.comments?.previous)
     },
-    obsolete: false
+    lastEditorName: cleanString(entry?.lastEditorName, 80),
+    obsolete: false,
+    revision: Math.max(0, Number(entry?.revision || 0) || 0),
+    updatedAt: cleanString(entry?.updatedAt, 40)
   };
 }
 
@@ -198,6 +201,28 @@ function makeName(name) {
 function makeOwnerName(name) {
   const trimmed = cleanString(name, 80).trim();
   return trimmed || "Anonymous editor";
+}
+
+function sanitizeTranslationValues(values, fallbackLength = 1) {
+  const targetLength = Math.max(1, Math.min(8, Number(fallbackLength || 1) || 1));
+  const nextValues = Array.isArray(values) && values.length > 0 ? values : Array.from({ length: targetLength }, () => "");
+
+  return nextValues
+    .slice(0, 8)
+    .map((value) => cleanString(value))
+    .concat(Array.from({ length: Math.max(0, targetLength - nextValues.length) }, () => ""))
+    .slice(0, targetLength);
+}
+
+function updateEntryContent(entry, translations, displayName) {
+  const updatedAt = nowIso();
+
+  entry.msgstr = sanitizeTranslationValues(translations, entry.msgstr?.length || 1);
+  entry.lastEditorName = makeOwnerName(displayName);
+  entry.revision = Math.max(0, Number(entry.revision || 0) || 0) + 1;
+  entry.updatedAt = updatedAt;
+
+  return updatedAt;
 }
 
 function normalizeDocumentPassword(password) {
@@ -441,6 +466,94 @@ export async function listDocuments(env, sessionId = "", options = {}) {
   return {
     ok: true,
     documents
+  };
+}
+
+export async function saveEntry(env, payload) {
+  const id = cleanString(payload?.id, 120);
+  const entryId = cleanString(payload?.entryId, 120);
+
+  if (!id || !entryId) {
+    return null;
+  }
+
+  const displayName = makeOwnerName(payload?.displayName);
+  const storageMode = getStorageMode(env);
+
+  if (storageMode === "d1") {
+    await ensureSchema(env.DB);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const current = await loadStoredDocument(env, id);
+
+      if (!current.record) {
+        return null;
+      }
+
+      await assertDocumentPassword(current.record, payload?.password);
+
+      const content = sanitizeDocument(current.record.content);
+      const entryIndex = content.entries.findIndex((entry) => entry.id === entryId);
+
+      if (entryIndex === -1) {
+        return null;
+      }
+
+      const updatedAt = updateEntryContent(content.entries[entryIndex], payload?.msgstr, displayName);
+      const result = await env.DB
+        .prepare("UPDATE documents SET content_json = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?")
+        .bind(JSON.stringify(content), updatedAt, id, current.record.version)
+        .run();
+
+      if (result.meta?.changes > 0) {
+        const record = await getD1Document(env.DB, id);
+
+        if (!record) {
+          return null;
+        }
+
+        const savedIndex = record.content.entries.findIndex((entry) => entry.id === entryId);
+
+        return {
+          ok: true,
+          entry: sanitizeEntry(record.content.entries[savedIndex], savedIndex),
+          meta: buildMeta(record, "d1")
+        };
+      }
+    }
+
+    throw new Error("This row is changing too quickly. Try again in a moment.");
+  }
+
+  const current = await loadStoredDocument(env, id);
+
+  if (!current.record) {
+    return null;
+  }
+
+  await assertDocumentPassword(current.record, payload?.password);
+
+  const record = memoryStore().documents.get(id);
+
+  if (!record) {
+    return null;
+  }
+
+  record.content = sanitizeDocument(record.content);
+  const entryIndex = record.content.entries.findIndex((entry) => entry.id === entryId);
+
+  if (entryIndex === -1) {
+    return null;
+  }
+
+  const updatedAt = updateEntryContent(record.content.entries[entryIndex], payload?.msgstr, displayName);
+  record.version += 1;
+  record.updatedAt = updatedAt;
+
+  return {
+    ok: true,
+    entry: sanitizeEntry(record.content.entries[entryIndex], entryIndex),
+    meta: buildMeta(record, "memory")
   };
 }
 

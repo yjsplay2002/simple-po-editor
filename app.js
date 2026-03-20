@@ -15,6 +15,8 @@ const state = {
   document: null,
   documentPassword: "3757",
   deleting: false,
+  editPassword: "",
+  entryStates: {},
   loading: false,
   lock: null,
   message: null,
@@ -34,6 +36,7 @@ let heartbeatTimer = null;
 let refreshTimer = null;
 let sharedDocsTimer = null;
 let sharedDocsRefreshToken = 0;
+const rowAutosaveTimers = new Map();
 
 function loadSessionId() {
   const existing = localStorage.getItem(STORAGE_KEYS.sessionId);
@@ -88,6 +91,55 @@ function upsertSharedDoc(item) {
     0,
     SHARED_DOC_LIMIT
   );
+}
+
+function entryState(entryId) {
+  if (!state.entryStates[entryId]) {
+    state.entryStates[entryId] = {
+      dirty: false,
+      error: "",
+      lastSavedAt: "",
+      saving: false
+    };
+  }
+
+  return state.entryStates[entryId];
+}
+
+function pendingEntryStates() {
+  return Object.values(state.entryStates).filter((item) => item.dirty || item.saving || item.error);
+}
+
+function clearEntryTimers() {
+  rowAutosaveTimers.forEach((timerId) => window.clearTimeout(timerId));
+  rowAutosaveTimers.clear();
+}
+
+function queueEntryAutosave(entryId, delay = 700) {
+  const currentTimer = rowAutosaveTimers.get(entryId);
+
+  if (currentTimer) {
+    window.clearTimeout(currentTimer);
+  }
+
+  const nextTimer = window.setTimeout(() => {
+    rowAutosaveTimers.delete(entryId);
+    void saveEntryTranslation(entryId);
+  }, delay);
+
+  rowAutosaveTimers.set(entryId, nextTimer);
+}
+
+function findDocumentEntry(entryId) {
+  return state.document?.entries.find((entry) => entry.id === entryId) || null;
+}
+
+function copyTranslations(values = []) {
+  return Array.isArray(values) ? values.map((value) => String(value ?? "")) : [""];
+}
+
+function sameTranslations(left = [], right = []) {
+  return JSON.stringify(copyTranslations(left)) === JSON.stringify(copyTranslations(right));
 }
 
 function setMessage(kind, text) {
@@ -145,10 +197,6 @@ function storageSummary() {
   }
 
   return "Checking shared storage availability for this deployment.";
-}
-
-function isEditing() {
-  return Boolean(state.lock?.isActive && state.lock?.isMine);
 }
 
 function escapeHtml(value) {
@@ -215,24 +263,19 @@ function hydrateDocumentFromPayload(payload) {
   upsertSharedDoc(payload);
 }
 
-function applyMetaAndLockFromPayload(payload) {
-  state.lock = payload.lock;
-  state.meta = payload.meta;
-  state.currentDocId = payload.meta.id;
-  state.currentFileName = payload.meta.name;
-  state.storageMode = payload.meta.storageMode;
-  upsertSharedDoc(payload);
-}
-
 function clearDocumentState() {
   cleanupTimers();
+  clearEntryTimers();
   state.currentDocId = "";
   state.currentFileName = "";
   state.deleting = false;
   state.document = null;
+  state.editPassword = "";
+  state.entryStates = {};
   state.lock = null;
   state.meta = null;
   state.dirty = false;
+  state.saving = false;
 }
 
 async function detectStorageMode() {
@@ -278,6 +321,90 @@ async function refreshSharedDocs({ quiet = false } = {}) {
     state.sharedDocsLoading = false;
     render();
   }
+}
+
+function ensureEditPassword() {
+  if (state.editPassword) {
+    return state.editPassword;
+  }
+
+  const password = requestDocumentPassword(`Enable autosave for "${state.currentFileName}".`);
+
+  if (!password) {
+    return null;
+  }
+
+  state.editPassword = password;
+  return password;
+}
+
+function mergeDocumentFromPayload(payload) {
+  if (!state.document) {
+    hydrateDocumentFromPayload(payload);
+    return;
+  }
+
+  const localEntries = new Map(state.document.entries.map((entry) => [entry.id, entry]));
+  const mergedEntries = payload.document.entries.map((remoteEntry) => {
+    const localEntry = localEntries.get(remoteEntry.id);
+    const currentState = state.entryStates[remoteEntry.id];
+
+    if (!localEntry) {
+      return remoteEntry;
+    }
+
+    if (currentState?.dirty || currentState?.saving) {
+      if ((Number(remoteEntry.revision || 0) || 0) > (Number(localEntry.revision || 0) || 0)) {
+        currentState.error = "Remote updates landed on this row. Your next autosave will overwrite them.";
+      }
+
+      return localEntry;
+    }
+
+    return remoteEntry;
+  });
+
+  state.document = {
+    ...payload.document,
+    entries: mergedEntries
+  };
+  state.meta = payload.meta;
+  state.currentDocId = payload.meta.id;
+  state.currentFileName = payload.meta.name;
+  state.storageMode = payload.meta.storageMode;
+  upsertSharedDoc(payload);
+}
+
+function applySavedEntry(payload, submittedTranslations) {
+  if (!state.document) {
+    return;
+  }
+
+  const rowState = entryState(payload.entry.id);
+  const currentEntry = findDocumentEntry(payload.entry.id);
+
+  if (!currentEntry) {
+    return;
+  }
+
+  const hasNewerDraft = !sameTranslations(currentEntry.msgstr, submittedTranslations);
+
+  currentEntry.revision = payload.entry.revision;
+  currentEntry.updatedAt = payload.entry.updatedAt;
+  currentEntry.lastEditorName = payload.entry.lastEditorName;
+
+  if (!hasNewerDraft) {
+    currentEntry.msgstr = copyTranslations(payload.entry.msgstr);
+    rowState.dirty = false;
+    rowState.error = "";
+  } else {
+    rowState.dirty = true;
+  }
+
+  rowState.lastSavedAt = payload.entry.updatedAt || "";
+  state.meta = payload.meta;
+  state.storageMode = payload.meta.storageMode || state.storageMode;
+  upsertSharedDoc(payload);
 }
 
 async function loadDocument(id, { quiet = false } = {}) {
@@ -351,7 +478,7 @@ async function createFromPoFile(file) {
       payload.meta.storageMode === "memory" ? "info" : "success",
       payload.meta.storageMode === "memory"
         ? "Document created in local memory mode. Add a D1 binding before sharing for durable team storage."
-        : "Document created. Share the link and have one teammate take the editing lock."
+        : "Document created. Share the link and everyone will see live row updates."
     );
     render();
     scheduleTimers();
@@ -364,105 +491,34 @@ async function createFromPoFile(file) {
   }
 }
 
-async function requestLock() {
-  if (!state.currentDocId || isEditing()) {
-    return;
-  }
-
-  try {
-    const payload = await apiFetch("/api/lock", {
-      method: "POST",
-      body: JSON.stringify({
-        displayName: defaultDisplayName(),
-        id: state.currentDocId,
-        sessionId: state.sessionId
-      })
-    });
-
-    hydrateDocumentFromPayload(payload);
-
-    if (payload.lock.isMine) {
-      setMessage("success", "Editing lock acquired.");
-    } else {
-      setMessage("warning", `${payload.lock.holderName || "Another editor"} is currently editing this file.`);
-    }
-
-    render();
-    scheduleTimers();
-  } catch (err) {
-    setMessage("warning", err instanceof Error ? err.message : String(err));
-  }
-}
-
-async function releaseLock() {
-  if (!state.currentDocId || !state.lock?.isMine) {
-    return;
-  }
-
-  try {
-    const payload = await apiFetch("/api/release", {
-      method: "POST",
-      body: JSON.stringify({
-        id: state.currentDocId,
-        sessionId: state.sessionId
-      })
-    });
-    hydrateDocumentFromPayload(payload);
-    setMessage("info", "Editing lock released.");
-    render();
-    scheduleTimers();
-  } catch (err) {
-    setMessage("warning", err instanceof Error ? err.message : String(err));
-  }
-}
-
-async function refreshLock() {
-  if (!state.currentDocId || !state.lock?.isMine) {
-    return;
-  }
-
-  try {
-    const payload = await apiFetch("/api/heartbeat", {
-      method: "POST",
-      body: JSON.stringify({
-        displayName: defaultDisplayName(),
-        id: state.currentDocId,
-        sessionId: state.sessionId
-      })
-    });
-
-    if (state.dirty && state.document) {
-      applyMetaAndLockFromPayload(payload);
-    } else {
-      hydrateDocumentFromPayload(payload);
-    }
-
-    renderChrome();
-  } catch (err) {
-    setMessage("warning", err instanceof Error ? err.message : String(err));
-    cleanupTimers();
-  }
-}
-
 async function refreshDocumentIfNeeded() {
-  if (!state.currentDocId || isEditing()) {
+  if (!state.currentDocId) {
     return;
   }
 
   try {
-    const payload = await apiFetch(
-      `/api/document?id=${encodeURIComponent(state.currentDocId)}&sessionId=${encodeURIComponent(state.sessionId)}`
+    const summary = await apiFetch(
+      `/api/document?id=${encodeURIComponent(state.currentDocId)}&sessionId=${encodeURIComponent(state.sessionId)}&summary=1`
     );
-    const changed = payload.meta.version !== state.meta?.version;
 
-    hydrateDocumentFromPayload(payload);
-
-    if (changed && !state.dirty) {
-      setMessage("info", "The document view was refreshed with the latest saved changes.");
+    if (summary.meta.version !== state.meta?.version) {
+      const payload = await apiFetch(
+        `/api/document?id=${encodeURIComponent(state.currentDocId)}&sessionId=${encodeURIComponent(state.sessionId)}`
+      );
+      mergeDocumentFromPayload(payload);
+      render();
+    }
+  } catch (err) {
+    if ((err instanceof Error ? err.message : String(err)) === "Document not found.") {
+      clearDocumentState();
+      setRoute("");
+      render();
+      scheduleTimers();
+      void refreshSharedDocs({ quiet: true });
+      setMessage("warning", "This document was deleted.");
+      return;
     }
 
-    render();
-  } catch {
     renderChrome();
   }
 }
@@ -479,12 +535,8 @@ function cleanupTimers() {
 function scheduleTimers() {
   cleanupTimers();
 
-  if (state.currentDocId && isEditing()) {
-    heartbeatTimer = window.setInterval(refreshLock, 25_000);
-  }
-
-  if (state.currentDocId && !isEditing()) {
-    refreshTimer = window.setInterval(refreshDocumentIfNeeded, 15_000);
+  if (state.currentDocId) {
+    refreshTimer = window.setInterval(refreshDocumentIfNeeded, 2_000);
   }
 
   if (!state.currentDocId && !parseRoute()) {
@@ -535,47 +587,6 @@ function downloadCurrentPo() {
       setMessage("warning", err instanceof Error ? err.message : String(err));
       renderNotice();
     });
-}
-
-async function saveDocument() {
-  if (!state.document || !state.currentDocId || !isEditing()) {
-    return;
-  }
-
-  const password = requestDocumentPassword(`Save changes to "${state.currentFileName}".`);
-
-  if (!password) {
-    return;
-  }
-
-  state.saving = true;
-  renderChrome();
-
-  try {
-    const payload = await apiFetch("/api/save", {
-      method: "POST",
-      body: JSON.stringify({
-        displayName: defaultDisplayName(),
-        document: state.document,
-        id: state.currentDocId,
-        password,
-        sessionId: state.sessionId,
-        version: state.meta?.version || 0
-      })
-    });
-
-    hydrateDocumentFromPayload(payload);
-    state.dirty = false;
-    setMessage("success", "Changes saved.");
-    render();
-    scheduleTimers();
-  } catch (err) {
-    setMessage("warning", err instanceof Error ? err.message : String(err));
-    renderNotice();
-  } finally {
-    state.saving = false;
-    renderChrome();
-  }
 }
 
 async function deleteCurrentDocument() {
@@ -632,35 +643,6 @@ function copyShareLink() {
     .catch(() => setMessage("warning", "Clipboard copy failed. You can copy the URL manually."));
 }
 
-function lockLabel() {
-  if (!state.lock?.isActive) {
-    return "No active lock";
-  }
-
-  if (state.lock.isMine) {
-    return "You hold the editing lock";
-  }
-
-  const expiresIn = Math.max(0, Math.ceil((state.lock.expiresAt - Date.now()) / 1000));
-  return `${state.lock.holderName} is editing, expires in ${expiresIn}s`;
-}
-
-function sharedDocLockLabel(item) {
-  if (!item.lock?.isActive) {
-    return "Unlocked";
-  }
-
-  return `Locked by ${item.lock.holderName || "Anonymous editor"}`;
-}
-
-function sharedDocLockClass(item) {
-  if (!item.lock?.isActive) {
-    return "is-idle";
-  }
-
-  return "is-readonly";
-}
-
 function formatSharedDocUpdatedAt(value) {
   if (!value) {
     return "Updated time unavailable";
@@ -703,7 +685,7 @@ function renderHome() {
           <div class="recent-copy">
             <div class="recent-header">
               <strong>${escapeHtml(item.name)}</strong>
-              <span class="status-pill recent-lock-pill ${sharedDocLockClass(item)}">${escapeHtml(sharedDocLockLabel(item))}</span>
+              <span class="status-pill is-idle">Live sync</span>
             </div>
             <div class="recent-meta">
               <small class="mono">${escapeHtml(item.id)}</small>
@@ -721,7 +703,7 @@ function renderHome() {
     <div class="shell hero">
       <div class="hero-grid">
         <section>
-          <div class="eyebrow">simple-po-editor / anonymous lock flow</div>
+          <div class="eyebrow">simple-po-editor / anonymous live sync</div>
           <h1>Edit PO files without passing zip files around.</h1>
           <p class="hero-copy">
             Import a <code>.po</code> file, create a shared document link, let one teammate hold the edit lock,
@@ -731,7 +713,7 @@ function renderHome() {
           <div class="stat-grid">
             <div class="stat-card">
               <span>Editing model</span>
-              <strong>1 active lock</strong>
+              <strong>Live row sync</strong>
             </div>
             <div class="stat-card">
               <span>Sign-in flow</span>
@@ -863,7 +845,7 @@ function renderLoading() {
       <div class="empty-state">
         <div>
           <strong>Loading document...</strong>
-          <span class="muted">Pulling the latest saved translation data and lock state.</span>
+          <span class="muted">Pulling the latest saved translation data and live sync state.</span>
         </div>
       </div>
     </div>
@@ -877,20 +859,17 @@ function renderEditorShell() {
         <div>
           <div class="toolbar-meta">
             <span class="chip">${state.storageMode === "d1" ? "Cloud persistence ready" : "Memory mode"}</span>
-            <span id="lock-badge" class="status-pill"></span>
+            <span id="sync-badge" class="status-pill"></span>
             <span id="version-value" class="chip mono"></span>
           </div>
           <h1>${escapeHtml(state.currentFileName || "Untitled translation")}</h1>
-          <p>Share this URL with the team. One person edits, everyone else stays read-only until the lock is free.</p>
+          <p>Everyone can edit at once. Rows autosave after a short pause, and the sheet checks for remote updates every 2 seconds.</p>
         </div>
         <div class="toolbar-actions">
           <button id="home-button" class="button button-ghost">Home</button>
           <button id="copy-link-button" class="button button-ghost">Copy share link</button>
-          <button id="take-lock-button" class="button button-primary">${isEditing() ? "You are editing" : "Take editing lock"}</button>
-          <button id="release-lock-button" class="button button-danger">Release lock</button>
           <button id="delete-button" class="button button-danger">${state.deleting ? "Deleting..." : "Delete file"}</button>
           <button id="export-button" class="button button-ghost">Export .po</button>
-          <button id="save-button" class="button button-primary">Save changes</button>
         </div>
       </header>
 
@@ -922,7 +901,7 @@ function renderEditorShell() {
               </div>
               <div class="toolbar-meta">
                 <span id="stats-pill" class="chip mono"></span>
-                <span class="muted">Spreadsheet view with source, translation, and references only.</span>
+                <span class="muted">Spreadsheet view with source, translation, and references only. Same-row conflicts use the most recent autosave.</span>
               </div>
             </div>
           </div>
@@ -950,14 +929,11 @@ function renderEditorShell() {
     displayNameInput: root.querySelector("#sidebar-display-name"),
     exportButton: root.querySelector("#export-button"),
     homeButton: root.querySelector("#home-button"),
-    lockBadge: root.querySelector("#lock-badge"),
     notice: root.querySelector("#notice"),
-    releaseLockButton: root.querySelector("#release-lock-button"),
-    saveButton: root.querySelector("#save-button"),
     searchInput: root.querySelector("#search-input"),
     sheetBody: root.querySelector("#sheet-body"),
+    syncBadge: root.querySelector("#sync-badge"),
     statsPill: root.querySelector("#stats-pill"),
-    takeLockButton: root.querySelector("#take-lock-button"),
     versionValue: root.querySelector("#version-value")
   };
 
@@ -974,10 +950,7 @@ function renderEditorShell() {
   refs.homeButton.addEventListener("click", goHome);
   refs.copyLinkButton.addEventListener("click", copyShareLink);
   refs.deleteButton.addEventListener("click", deleteCurrentDocument);
-  refs.takeLockButton.addEventListener("click", requestLock);
-  refs.releaseLockButton.addEventListener("click", releaseLock);
   refs.exportButton.addEventListener("click", downloadCurrentPo);
-  refs.saveButton.addEventListener("click", saveDocument);
 
   root.querySelectorAll("[data-filter]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -995,26 +968,37 @@ function renderEditorShell() {
 }
 
 function renderChrome() {
-  if (!refs.lockBadge || !state.document || !state.meta) {
+  if (!refs.syncBadge || !state.document || !state.meta) {
     return;
   }
 
   const summary = summarizeEntries(state.document.entries);
+  const pendingRows = pendingEntryStates();
+  const errorRows = pendingRows.filter((entry) => entry.error).length;
+  const savingRows = pendingRows.filter((entry) => entry.saving).length;
+  const dirtyRows = pendingRows.filter((entry) => entry.dirty).length;
 
-  refs.lockBadge.textContent = lockLabel();
-  refs.lockBadge.className = `status-pill ${isEditing() ? "is-editing" : "is-readonly"}`;
+  if (errorRows > 0) {
+    refs.syncBadge.textContent = `${errorRows} row${errorRows > 1 ? "s" : ""} need attention`;
+    refs.syncBadge.className = "status-pill is-readonly";
+  } else if (savingRows > 0) {
+    refs.syncBadge.textContent = `${savingRows} row${savingRows > 1 ? "s" : ""} autosaving`;
+    refs.syncBadge.className = "status-pill is-editing";
+  } else if (dirtyRows > 0) {
+    refs.syncBadge.textContent = `${dirtyRows} row${dirtyRows > 1 ? "s" : ""} waiting to sync`;
+    refs.syncBadge.className = "status-pill is-pending";
+  } else {
+    refs.syncBadge.textContent = "Live sync every 2s";
+    refs.syncBadge.className = "status-pill is-idle";
+  }
+
   refs.statsPill.textContent = `${summary.translated}/${summary.total} translated`;
   refs.versionValue.textContent = `v${state.meta.version}`;
-  refs.homeButton.disabled = state.deleting || state.saving;
+  refs.homeButton.disabled = state.deleting;
   refs.copyLinkButton.disabled = state.deleting;
-  refs.deleteButton.disabled = state.deleting || state.saving;
+  refs.deleteButton.disabled = state.deleting || savingRows > 0;
   refs.deleteButton.textContent = state.deleting ? "Deleting..." : "Delete file";
   refs.exportButton.disabled = state.deleting;
-  refs.takeLockButton.disabled = state.deleting || isEditing() || Boolean(state.lock?.isActive && !state.lock?.isMine);
-  refs.takeLockButton.textContent = isEditing() ? "You are editing" : "Take editing lock";
-  refs.releaseLockButton.disabled = state.deleting || !isEditing();
-  refs.saveButton.disabled = state.deleting || !isEditing() || !state.dirty || state.saving;
-  refs.saveButton.textContent = state.saving ? "Saving..." : state.dirty ? "Save changes" : "Saved";
 }
 
 function entryReferenceText(entry) {
@@ -1026,24 +1010,133 @@ function sheetRowClass(entry) {
 }
 
 function updateEntryTranslation(entryId, index, value, row) {
-  if (!state.document || !isEditing()) {
+  if (!state.document) {
     return;
   }
 
-  const entry = state.document.entries.find((item) => item.id === entryId);
+  const entry = findDocumentEntry(entryId);
 
   if (!entry) {
     return;
   }
 
   entry.msgstr[index] = value;
-  state.dirty = true;
+  const currentState = entryState(entryId);
+  currentState.dirty = true;
+  currentState.error = "";
+  queueEntryAutosave(entryId);
 
   if (row) {
     row.className = sheetRowClass(entry);
   }
 
+  state.dirty = true;
   renderChrome();
+}
+
+async function saveEntryTranslation(entryId) {
+  if (!state.document || !state.currentDocId) {
+    return;
+  }
+
+  const entry = findDocumentEntry(entryId);
+
+  if (!entry) {
+    return;
+  }
+
+  const currentState = entryState(entryId);
+
+  if (currentState.saving) {
+    return;
+  }
+
+  const password = ensureEditPassword();
+
+  if (!password) {
+    currentState.error = "Autosave is waiting for the document password.";
+    renderSpreadsheet();
+    renderChrome();
+    return;
+  }
+
+  const submittedTranslations = copyTranslations(entry.msgstr);
+  currentState.saving = true;
+  currentState.error = "";
+  renderSpreadsheet();
+  renderChrome();
+
+  try {
+    const payload = await apiFetch("/api/entry-save", {
+      method: "POST",
+      body: JSON.stringify({
+        displayName: defaultDisplayName(),
+        entryId,
+        id: state.currentDocId,
+        msgstr: submittedTranslations,
+        password
+      })
+    });
+
+    applySavedEntry(payload, submittedTranslations);
+    currentState.lastSavedAt = payload.entry.updatedAt || "";
+    currentState.saving = false;
+
+    if (currentState.dirty) {
+      queueEntryAutosave(entryId, 250);
+    }
+  } catch (err) {
+    currentState.saving = false;
+    currentState.error = err instanceof Error ? err.message : String(err);
+
+    if (currentState.error === "Document password is incorrect." || currentState.error === "Document password is required.") {
+      state.editPassword = "";
+      currentState.error = "Autosave paused. Re-enter the document password by typing in this row again.";
+    }
+  }
+
+  renderSpreadsheet();
+  renderChrome();
+}
+
+function entrySyncLabel(entry) {
+  const currentState = state.entryStates[entry.id];
+
+  if (currentState?.error) {
+    return currentState.error;
+  }
+
+  if (currentState?.saving) {
+    return "Autosaving...";
+  }
+
+  if (currentState?.dirty) {
+    return "Waiting to sync...";
+  }
+
+  if (entry.lastEditorName && entry.updatedAt) {
+    return `Synced by ${entry.lastEditorName} at ${formatSharedDocUpdatedAt(entry.updatedAt)}`;
+  }
+
+  return "Ready for live edits";
+}
+
+function entrySyncClass(entry) {
+  const currentState = state.entryStates[entry.id];
+
+  if (currentState?.error) {
+    return "is-error";
+  }
+
+  if (currentState?.saving) {
+    return "is-saving";
+  }
+
+  if (currentState?.dirty) {
+    return "is-pending";
+  }
+
+  return "is-idle";
 }
 
 function renderSpreadsheet() {
@@ -1077,7 +1170,6 @@ function renderSpreadsheet() {
                 class="textarea sheet-textarea"
                 data-entry-id="${escapeAttribute(entry.id)}"
                 data-msgstr-index="${index}"
-                ${!isEditing() ? "readonly" : ""}
               >${escapeHtml(value)}</textarea>
             </div>
           `
@@ -1092,6 +1184,7 @@ function renderSpreadsheet() {
           </div>
           <div class="sheet-cell" data-col="Translation Text">
             <div class="sheet-translation-stack">${translationFields}</div>
+            <div class="sheet-row-status ${entrySyncClass(entry)}">${escapeHtml(entrySyncLabel(entry))}</div>
           </div>
           <div class="sheet-cell" data-col="References">
             <div class="sheet-reference ${entry.comments.reference.length ? "" : "is-empty"}">${escapeHtml(entryReferenceText(entry))}</div>
@@ -1134,27 +1227,9 @@ window.addEventListener("hashchange", async () => {
 window.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
-    saveDocument();
+    setMessage("info", "Rows save automatically after a short pause.");
+    renderNotice();
   }
-});
-
-window.addEventListener("beforeunload", () => {
-  if (!state.currentDocId || !isEditing()) {
-    return;
-  }
-
-  navigator.sendBeacon(
-    "/api/release",
-    new Blob(
-      [
-        JSON.stringify({
-          id: state.currentDocId,
-          sessionId: state.sessionId
-        })
-      ],
-      { type: "application/json" }
-    )
-  );
 });
 
 async function boot() {
