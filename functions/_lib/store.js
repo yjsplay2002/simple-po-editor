@@ -135,20 +135,29 @@ function normalizeActiveLock(document, sessionId) {
   };
 }
 
-function shapeResponse(document, sessionId, storageMode) {
+function buildMeta(document, storageMode) {
   return {
+    id: document.id,
+    name: document.name,
+    version: document.version,
+    createdAt: document.createdAt,
+    updatedAt: document.updatedAt,
+    storageMode
+  };
+}
+
+function shapeResponse(document, sessionId, storageMode, options = {}) {
+  const response = {
     ok: true,
-    document: sanitizeDocument(document.content),
-    meta: {
-      id: document.id,
-      name: document.name,
-      version: document.version,
-      createdAt: document.createdAt,
-      updatedAt: document.updatedAt,
-      storageMode
-    },
+    meta: buildMeta(document, storageMode),
     lock: normalizeActiveLock(document, sessionId)
   };
+
+  if (options.includeDocument !== false) {
+    response.document = sanitizeDocument(document.content);
+  }
+
+  return response;
 }
 
 async function ensureSchema(db) {
@@ -359,7 +368,7 @@ export async function createDocument(env, payload) {
   return shapeResponse(record, record.lockOwnerId, "memory");
 }
 
-export async function getDocument(env, id, sessionId = "") {
+export async function getDocument(env, id, sessionId = "", options = {}) {
   if (!id) {
     return null;
   }
@@ -370,7 +379,7 @@ export async function getDocument(env, id, sessionId = "") {
     return null;
   }
 
-  return shapeResponse(record, sessionId, storageMode);
+  return shapeResponse(record, sessionId, storageMode, options);
 }
 
 export async function acquireLock(env, payload) {

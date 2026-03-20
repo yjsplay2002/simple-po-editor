@@ -120,3 +120,16 @@ test("legacy documents without a stored password fall back to 3757", async () =>
 
   assert.equal(deleted?.deletedId, legacyId);
 });
+
+test("getDocument can return a recent-list summary without the document body", async () => {
+  const env = { ALLOW_MEMORY_STORE: true };
+  const created = await createDocument(env, makeDocumentPayload());
+  const summary = await getDocument(env, created.meta.id, "session-2", {
+    includeDocument: false
+  });
+
+  assert.equal(summary?.document, undefined);
+  assert.equal(summary?.meta.id, created.meta.id);
+  assert.equal(summary?.lock.isActive, true);
+  assert.equal(summary?.lock.isMine, false);
+});

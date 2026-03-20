@@ -30,6 +30,8 @@ const root = document.querySelector("#app");
 let refs = {};
 let heartbeatTimer = null;
 let refreshTimer = null;
+let recentDocsTimer = null;
+let recentDocsRefreshToken = 0;
 
 function loadSessionId() {
   const existing = localStorage.getItem(STORAGE_KEYS.sessionId);
@@ -47,17 +49,46 @@ function loadDisplayName() {
   return localStorage.getItem(STORAGE_KEYS.displayName) || "";
 }
 
+function makeRecentDoc(item) {
+  const id = typeof item?.id === "string" ? item.id.trim() : "";
+
+  if (!id) {
+    return null;
+  }
+
+  const name = typeof item?.name === "string" && item.name.trim() ? item.name.trim().slice(0, 120) : "Untitled translation";
+
+  return {
+    id,
+    name,
+    openedAt: typeof item?.openedAt === "string" ? item.openedAt : "",
+    lock: item?.lock || null,
+    storageMode: typeof item?.storageMode === "string" ? item.storageMode : "",
+    syncState: typeof item?.syncState === "string" ? item.syncState : "idle",
+    updatedAt: typeof item?.updatedAt === "string" ? item.updatedAt : ""
+  };
+}
+
 function loadRecentDocs() {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEYS.recentDocs) || "[]");
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? parsed.map(makeRecentDoc).filter(Boolean).slice(0, 8) : [];
   } catch {
     return [];
   }
 }
 
 function saveRecentDocs() {
-  localStorage.setItem(STORAGE_KEYS.recentDocs, JSON.stringify(state.recentDocs.slice(0, 8)));
+  localStorage.setItem(
+    STORAGE_KEYS.recentDocs,
+    JSON.stringify(
+      state.recentDocs.slice(0, 8).map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        openedAt: entry.openedAt
+      }))
+    )
+  );
 }
 
 function saveDisplayName() {
@@ -82,6 +113,8 @@ function goHome() {
   clearDocumentState();
   setRoute("");
   render();
+  scheduleTimers();
+  void refreshRecentDocs({ quiet: true });
 }
 
 function parseRoute() {
@@ -182,11 +215,19 @@ async function apiFetch(url, options = {}) {
   return payload;
 }
 
-function upsertRecentDoc(id, name) {
-  state.recentDocs = [{ id, name, openedAt: new Date().toISOString() }, ...state.recentDocs.filter((entry) => entry.id !== id)].slice(
-    0,
-    8
-  );
+function upsertRecentDoc(id, name, details = {}) {
+  const existing = state.recentDocs.find((entry) => entry.id === id);
+  const nextEntry = {
+    id,
+    name,
+    openedAt: new Date().toISOString(),
+    lock: details.lock ?? existing?.lock ?? null,
+    storageMode: details.storageMode ?? existing?.storageMode ?? "",
+    syncState: details.syncState ?? existing?.syncState ?? "idle",
+    updatedAt: details.updatedAt ?? existing?.updatedAt ?? ""
+  };
+
+  state.recentDocs = [nextEntry, ...state.recentDocs.filter((entry) => entry.id !== id)].slice(0, 8);
   saveRecentDocs();
 }
 
@@ -197,7 +238,12 @@ function hydrateDocumentFromPayload(payload) {
   state.currentDocId = payload.meta.id;
   state.currentFileName = payload.meta.name;
   state.storageMode = payload.meta.storageMode;
-  upsertRecentDoc(payload.meta.id, payload.meta.name);
+  upsertRecentDoc(payload.meta.id, payload.meta.name, {
+    lock: payload.lock,
+    storageMode: payload.meta.storageMode,
+    syncState: "ready",
+    updatedAt: payload.meta.updatedAt
+  });
 }
 
 function applyMetaAndLockFromPayload(payload) {
@@ -206,7 +252,12 @@ function applyMetaAndLockFromPayload(payload) {
   state.currentDocId = payload.meta.id;
   state.currentFileName = payload.meta.name;
   state.storageMode = payload.meta.storageMode;
-  upsertRecentDoc(payload.meta.id, payload.meta.name);
+  upsertRecentDoc(payload.meta.id, payload.meta.name, {
+    lock: payload.lock,
+    storageMode: payload.meta.storageMode,
+    syncState: "ready",
+    updatedAt: payload.meta.updatedAt
+  });
 }
 
 function clearDocumentState() {
@@ -231,10 +282,82 @@ async function detectStorageMode() {
   render();
 }
 
+async function fetchRecentDocSummary(id) {
+  const response = await fetch(
+    `/api/document?id=${encodeURIComponent(id)}&sessionId=${encodeURIComponent(state.sessionId)}&summary=1`
+  );
+  const payload = await response.json().catch(() => null);
+
+  return {
+    status: response.status,
+    payload
+  };
+}
+
+async function refreshRecentDocs({ quiet = false } = {}) {
+  if (state.currentDocId || parseRoute() || state.recentDocs.length === 0) {
+    return;
+  }
+
+  const token = ++recentDocsRefreshToken;
+  const snapshot = state.recentDocs.slice(0, 8);
+
+  if (!quiet) {
+    state.recentDocs = snapshot.map((entry) => ({
+      ...entry,
+      syncState: entry.syncState === "ready" ? "ready" : "checking"
+    }));
+    render();
+  }
+
+  const refreshedDocs = await Promise.all(
+    snapshot.map(async (entry) => {
+      try {
+        const { status, payload } = await fetchRecentDocSummary(entry.id);
+
+        if (status === 404 || payload?.error === "Document not found.") {
+          return null;
+        }
+
+        if (!payload?.ok) {
+          return {
+            ...entry,
+            syncState: "error"
+          };
+        }
+
+        return {
+          ...entry,
+          name: payload.meta.name,
+          lock: payload.lock,
+          storageMode: payload.meta.storageMode,
+          syncState: "ready",
+          updatedAt: payload.meta.updatedAt
+        };
+      } catch {
+        return {
+          ...entry,
+          syncState: "error"
+        };
+      }
+    })
+  );
+
+  if (token !== recentDocsRefreshToken || state.currentDocId || parseRoute()) {
+    return;
+  }
+
+  state.recentDocs = refreshedDocs.filter(Boolean);
+  saveRecentDocs();
+  render();
+}
+
 async function loadDocument(id, { quiet = false } = {}) {
   if (!id) {
     clearDocumentState();
     render();
+    scheduleTimers();
+    void refreshRecentDocs({ quiet: true });
     return;
   }
 
@@ -250,9 +373,22 @@ async function loadDocument(id, { quiet = false } = {}) {
     render();
     scheduleTimers();
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const missingDocument = message === "Document not found.";
+
     clearDocumentState();
-    setMessage("warning", err instanceof Error ? err.message : String(err));
+
+    if (missingDocument) {
+      removeRecentDoc(id);
+      setRoute("");
+      setMessage("warning", "Document not found. It was removed from Recent documents.");
+    } else {
+      setMessage("warning", message);
+    }
+
     render();
+    scheduleTimers();
+    void refreshRecentDocs({ quiet: true });
   } finally {
     state.loading = false;
     renderChrome();
@@ -407,8 +543,10 @@ async function refreshDocumentIfNeeded() {
 function cleanupTimers() {
   window.clearInterval(heartbeatTimer);
   window.clearInterval(refreshTimer);
+  window.clearInterval(recentDocsTimer);
   heartbeatTimer = null;
   refreshTimer = null;
+  recentDocsTimer = null;
 }
 
 function scheduleTimers() {
@@ -420,6 +558,12 @@ function scheduleTimers() {
 
   if (state.currentDocId && !isEditing()) {
     refreshTimer = window.setInterval(refreshDocumentIfNeeded, 15_000);
+  }
+
+  if (!state.currentDocId && !parseRoute() && state.recentDocs.length > 0) {
+    recentDocsTimer = window.setInterval(() => {
+      void refreshRecentDocs({ quiet: true });
+    }, 15_000);
   }
 }
 
@@ -542,6 +686,7 @@ async function deleteCurrentDocument() {
     clearDocumentState();
     setRoute("");
     render();
+    scheduleTimers();
     setMessage("success", `"${payload.deletedName || deletedName}" was deleted.`);
   } catch (err) {
     setMessage("warning", err instanceof Error ? err.message : String(err));
@@ -572,6 +717,38 @@ function lockLabel() {
   return `${state.lock.holderName} is editing, expires in ${expiresIn}s`;
 }
 
+function recentDocLockLabel(item) {
+  if (item.syncState === "checking" || item.syncState === "idle") {
+    return "Checking lock...";
+  }
+
+  if (item.syncState === "error") {
+    return "Status unavailable";
+  }
+
+  if (!item.lock?.isActive) {
+    return "Unlocked";
+  }
+
+  if (item.lock.isMine) {
+    return "Locked by you";
+  }
+
+  return `Locked by ${item.lock.holderName || "another editor"}`;
+}
+
+function recentDocLockClass(item) {
+  if (item.syncState === "checking" || item.syncState === "idle" || item.syncState === "error") {
+    return "is-pending";
+  }
+
+  if (!item.lock?.isActive) {
+    return "is-idle";
+  }
+
+  return item.lock.isMine ? "is-editing" : "is-readonly";
+}
+
 function renderNotice() {
   if (!refs.notice) {
     return;
@@ -592,8 +769,11 @@ function renderHome() {
     .map(
       (item) => `
         <div class="recent-item">
-          <div>
-            <strong>${escapeHtml(item.name)}</strong>
+          <div class="recent-copy">
+            <div class="recent-header">
+              <strong>${escapeHtml(item.name)}</strong>
+              <span class="status-pill recent-lock-pill ${recentDocLockClass(item)}">${escapeHtml(recentDocLockLabel(item))}</span>
+            </div>
             <small class="mono">${escapeHtml(item.id)}</small>
           </div>
           <button class="button button-ghost" data-open-doc="${item.id}">Open</button>
@@ -1050,6 +1230,8 @@ async function boot() {
   }
 
   render();
+  scheduleTimers();
+  await refreshRecentDocs({ quiet: true });
 }
 
 boot();
