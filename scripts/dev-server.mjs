@@ -10,6 +10,7 @@ const port = Number(process.env.PORT || 8787);
 
 const apiModules = {
   "/api/create": "./functions/api/create.js",
+  "/api/documents": "./functions/api/documents.js",
   "/api/document": "./functions/api/document.js",
   "/api/lock": "./functions/api/lock.js",
   "/api/heartbeat": "./functions/api/heartbeat.js",

@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createDocument, deleteDocument, DocumentPasswordError, getDocument, StorageConfigError } from "../functions/_lib/store.js";
+import {
+  createDocument,
+  deleteDocument,
+  DocumentPasswordError,
+  getDocument,
+  listDocuments,
+  StorageConfigError
+} from "../functions/_lib/store.js";
 
 function makeDocumentPayload() {
   return {
@@ -132,4 +139,37 @@ test("getDocument can return a recent-list summary without the document body", a
   assert.equal(summary?.meta.id, created.meta.id);
   assert.equal(summary?.lock.isActive, true);
   assert.equal(summary?.lock.isMine, false);
+});
+
+test("listDocuments returns shared summaries in updated order", async () => {
+  const env = { ALLOW_MEMORY_STORE: true };
+  const memoryKey = Symbol.for("simple-po-editor.memory");
+
+  globalThis[memoryKey] = {
+    documents: new Map()
+  };
+
+  const first = await createDocument(env, {
+    ...makeDocumentPayload(),
+    name: "first"
+  });
+  const second = await createDocument(env, {
+    ...makeDocumentPayload(),
+    name: "second",
+    sessionId: "session-2"
+  });
+  const documents = globalThis[memoryKey].documents;
+
+  documents.get(first.meta.id).updatedAt = "2026-03-01T00:00:00.000Z";
+  documents.get(second.meta.id).updatedAt = "2026-03-02T00:00:00.000Z";
+
+  const listed = await listDocuments(env, "session-3", { limit: 10 });
+
+  assert.deepEqual(
+    listed.documents.map((item) => item.meta.name),
+    ["second", "first"]
+  );
+  assert.equal(listed.documents[0].lock.isActive, true);
+  assert.equal(listed.documents[0].lock.isMine, false);
+  assert.equal(listed.documents[0].document, undefined);
 });

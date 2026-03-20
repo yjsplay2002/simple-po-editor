@@ -355,6 +355,12 @@ a {
   color: var(--muted);
 }
 
+.recent-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .recent-lock-pill {
   flex-shrink: 0;
 }

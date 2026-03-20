@@ -2,9 +2,10 @@ import { getEntryStatus, parsePo, summarizeEntries } from "./po.js";
 
 const STORAGE_KEYS = {
   displayName: "simple-po-editor.display-name",
-  recentDocs: "simple-po-editor.recent-docs",
   sessionId: "simple-po-editor.session-id"
 };
+
+const SHARED_DOC_LIMIT = 24;
 
 const state = {
   currentDocId: "",
@@ -18,10 +19,11 @@ const state = {
   lock: null,
   message: null,
   meta: null,
-  recentDocs: loadRecentDocs(),
   saving: false,
   search: "",
   sessionId: loadSessionId(),
+  sharedDocs: [],
+  sharedDocsLoading: false,
   statusFilter: "all",
   storageMode: "checking"
 };
@@ -30,8 +32,8 @@ const root = document.querySelector("#app");
 let refs = {};
 let heartbeatTimer = null;
 let refreshTimer = null;
-let recentDocsTimer = null;
-let recentDocsRefreshToken = 0;
+let sharedDocsTimer = null;
+let sharedDocsRefreshToken = 0;
 
 function loadSessionId() {
   const existing = localStorage.getItem(STORAGE_KEYS.sessionId);
@@ -49,55 +51,43 @@ function loadDisplayName() {
   return localStorage.getItem(STORAGE_KEYS.displayName) || "";
 }
 
-function makeRecentDoc(item) {
-  const id = typeof item?.id === "string" ? item.id.trim() : "";
+function saveDisplayName() {
+  localStorage.setItem(STORAGE_KEYS.displayName, state.displayName.trim());
+}
+
+function normalizeSharedDoc(item) {
+  const meta = item?.meta || item;
+  const id = typeof meta?.id === "string" ? meta.id.trim() : "";
 
   if (!id) {
     return null;
   }
 
-  const name = typeof item?.name === "string" && item.name.trim() ? item.name.trim().slice(0, 120) : "Untitled translation";
-
   return {
     id,
-    name,
-    openedAt: typeof item?.openedAt === "string" ? item.openedAt : "",
+    name: typeof meta?.name === "string" && meta.name.trim() ? meta.name.trim().slice(0, 120) : "Untitled translation",
     lock: item?.lock || null,
-    storageMode: typeof item?.storageMode === "string" ? item.storageMode : "",
-    syncState: typeof item?.syncState === "string" ? item.syncState : "idle",
-    updatedAt: typeof item?.updatedAt === "string" ? item.updatedAt : ""
+    storageMode: typeof meta?.storageMode === "string" ? meta.storageMode : "",
+    updatedAt: typeof meta?.updatedAt === "string" ? meta.updatedAt : "",
+    version: Number(meta?.version || 0)
   };
 }
 
-function loadRecentDocs() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEYS.recentDocs) || "[]");
-    return Array.isArray(parsed) ? parsed.map(makeRecentDoc).filter(Boolean).slice(0, 8) : [];
-  } catch {
-    return [];
+function sortSharedDocs(documents) {
+  return [...documents].sort((left, right) => Date.parse(right.updatedAt || "") - Date.parse(left.updatedAt || ""));
+}
+
+function upsertSharedDoc(item) {
+  const nextEntry = normalizeSharedDoc(item);
+
+  if (!nextEntry) {
+    return;
   }
-}
 
-function saveRecentDocs() {
-  localStorage.setItem(
-    STORAGE_KEYS.recentDocs,
-    JSON.stringify(
-      state.recentDocs.slice(0, 8).map((entry) => ({
-        id: entry.id,
-        name: entry.name,
-        openedAt: entry.openedAt
-      }))
-    )
+  state.sharedDocs = sortSharedDocs([nextEntry, ...state.sharedDocs.filter((entry) => entry.id !== nextEntry.id)]).slice(
+    0,
+    SHARED_DOC_LIMIT
   );
-}
-
-function saveDisplayName() {
-  localStorage.setItem(STORAGE_KEYS.displayName, state.displayName.trim());
-}
-
-function removeRecentDoc(id) {
-  state.recentDocs = state.recentDocs.filter((entry) => entry.id !== id);
-  saveRecentDocs();
 }
 
 function setMessage(kind, text) {
@@ -114,7 +104,7 @@ function goHome() {
   setRoute("");
   render();
   scheduleTimers();
-  void refreshRecentDocs({ quiet: true });
+  void refreshSharedDocs({ quiet: true });
 }
 
 function parseRoute() {
@@ -215,22 +205,6 @@ async function apiFetch(url, options = {}) {
   return payload;
 }
 
-function upsertRecentDoc(id, name, details = {}) {
-  const existing = state.recentDocs.find((entry) => entry.id === id);
-  const nextEntry = {
-    id,
-    name,
-    openedAt: new Date().toISOString(),
-    lock: details.lock ?? existing?.lock ?? null,
-    storageMode: details.storageMode ?? existing?.storageMode ?? "",
-    syncState: details.syncState ?? existing?.syncState ?? "idle",
-    updatedAt: details.updatedAt ?? existing?.updatedAt ?? ""
-  };
-
-  state.recentDocs = [nextEntry, ...state.recentDocs.filter((entry) => entry.id !== id)].slice(0, 8);
-  saveRecentDocs();
-}
-
 function hydrateDocumentFromPayload(payload) {
   state.document = payload.document;
   state.lock = payload.lock;
@@ -238,12 +212,7 @@ function hydrateDocumentFromPayload(payload) {
   state.currentDocId = payload.meta.id;
   state.currentFileName = payload.meta.name;
   state.storageMode = payload.meta.storageMode;
-  upsertRecentDoc(payload.meta.id, payload.meta.name, {
-    lock: payload.lock,
-    storageMode: payload.meta.storageMode,
-    syncState: "ready",
-    updatedAt: payload.meta.updatedAt
-  });
+  upsertSharedDoc(payload);
 }
 
 function applyMetaAndLockFromPayload(payload) {
@@ -252,12 +221,7 @@ function applyMetaAndLockFromPayload(payload) {
   state.currentDocId = payload.meta.id;
   state.currentFileName = payload.meta.name;
   state.storageMode = payload.meta.storageMode;
-  upsertRecentDoc(payload.meta.id, payload.meta.name, {
-    lock: payload.lock,
-    storageMode: payload.meta.storageMode,
-    syncState: "ready",
-    updatedAt: payload.meta.updatedAt
-  });
+  upsertSharedDoc(payload);
 }
 
 function clearDocumentState() {
@@ -282,74 +246,38 @@ async function detectStorageMode() {
   render();
 }
 
-async function fetchRecentDocSummary(id) {
-  const response = await fetch(
-    `/api/document?id=${encodeURIComponent(id)}&sessionId=${encodeURIComponent(state.sessionId)}&summary=1`
-  );
-  const payload = await response.json().catch(() => null);
-
-  return {
-    status: response.status,
-    payload
-  };
-}
-
-async function refreshRecentDocs({ quiet = false } = {}) {
-  if (state.currentDocId || parseRoute() || state.recentDocs.length === 0) {
+async function refreshSharedDocs({ quiet = false } = {}) {
+  if (state.currentDocId || parseRoute()) {
     return;
   }
 
-  const token = ++recentDocsRefreshToken;
-  const snapshot = state.recentDocs.slice(0, 8);
+  const token = ++sharedDocsRefreshToken;
+  state.sharedDocsLoading = true;
 
-  if (!quiet) {
-    state.recentDocs = snapshot.map((entry) => ({
-      ...entry,
-      syncState: entry.syncState === "ready" ? "ready" : "checking"
-    }));
+  if (!quiet || state.sharedDocs.length === 0) {
     render();
   }
 
-  const refreshedDocs = await Promise.all(
-    snapshot.map(async (entry) => {
-      try {
-        const { status, payload } = await fetchRecentDocSummary(entry.id);
+  try {
+    const payload = await apiFetch(
+      `/api/documents?sessionId=${encodeURIComponent(state.sessionId)}&limit=${SHARED_DOC_LIMIT}`
+    );
 
-        if (status === 404 || payload?.error === "Document not found.") {
-          return null;
-        }
+    if (token !== sharedDocsRefreshToken || state.currentDocId || parseRoute()) {
+      return;
+    }
 
-        if (!payload?.ok) {
-          return {
-            ...entry,
-            syncState: "error"
-          };
-        }
+    state.sharedDocs = sortSharedDocs((payload.documents || []).map(normalizeSharedDoc).filter(Boolean));
+  } catch {
+    // Keep the last successful shared list visible when the refresh fails.
+  } finally {
+    if (token !== sharedDocsRefreshToken || state.currentDocId || parseRoute()) {
+      return;
+    }
 
-        return {
-          ...entry,
-          name: payload.meta.name,
-          lock: payload.lock,
-          storageMode: payload.meta.storageMode,
-          syncState: "ready",
-          updatedAt: payload.meta.updatedAt
-        };
-      } catch {
-        return {
-          ...entry,
-          syncState: "error"
-        };
-      }
-    })
-  );
-
-  if (token !== recentDocsRefreshToken || state.currentDocId || parseRoute()) {
-    return;
+    state.sharedDocsLoading = false;
+    render();
   }
-
-  state.recentDocs = refreshedDocs.filter(Boolean);
-  saveRecentDocs();
-  render();
 }
 
 async function loadDocument(id, { quiet = false } = {}) {
@@ -357,7 +285,7 @@ async function loadDocument(id, { quiet = false } = {}) {
     clearDocumentState();
     render();
     scheduleTimers();
-    void refreshRecentDocs({ quiet: true });
+    void refreshSharedDocs({ quiet: true });
     return;
   }
 
@@ -379,16 +307,15 @@ async function loadDocument(id, { quiet = false } = {}) {
     clearDocumentState();
 
     if (missingDocument) {
-      removeRecentDoc(id);
       setRoute("");
-      setMessage("warning", "Document not found. It was removed from Recent documents.");
+      setMessage("warning", "Document not found. It is no longer in the shared document list.");
     } else {
       setMessage("warning", message);
     }
 
     render();
     scheduleTimers();
-    void refreshRecentDocs({ quiet: true });
+    void refreshSharedDocs({ quiet: true });
   } finally {
     state.loading = false;
     renderChrome();
@@ -543,10 +470,10 @@ async function refreshDocumentIfNeeded() {
 function cleanupTimers() {
   window.clearInterval(heartbeatTimer);
   window.clearInterval(refreshTimer);
-  window.clearInterval(recentDocsTimer);
+  window.clearInterval(sharedDocsTimer);
   heartbeatTimer = null;
   refreshTimer = null;
-  recentDocsTimer = null;
+  sharedDocsTimer = null;
 }
 
 function scheduleTimers() {
@@ -560,9 +487,9 @@ function scheduleTimers() {
     refreshTimer = window.setInterval(refreshDocumentIfNeeded, 15_000);
   }
 
-  if (!state.currentDocId && !parseRoute() && state.recentDocs.length > 0) {
-    recentDocsTimer = window.setInterval(() => {
-      void refreshRecentDocs({ quiet: true });
+  if (!state.currentDocId && !parseRoute()) {
+    sharedDocsTimer = window.setInterval(() => {
+      void refreshSharedDocs({ quiet: true });
     }, 15_000);
   }
 }
@@ -682,11 +609,12 @@ async function deleteCurrentDocument() {
       })
     });
 
-    removeRecentDoc(deletedId);
+    state.sharedDocs = state.sharedDocs.filter((entry) => entry.id !== deletedId);
     clearDocumentState();
     setRoute("");
     render();
     scheduleTimers();
+    void refreshSharedDocs({ quiet: true });
     setMessage("success", `"${payload.deletedName || deletedName}" was deleted.`);
   } catch (err) {
     setMessage("warning", err instanceof Error ? err.message : String(err));
@@ -717,36 +645,39 @@ function lockLabel() {
   return `${state.lock.holderName} is editing, expires in ${expiresIn}s`;
 }
 
-function recentDocLockLabel(item) {
-  if (item.syncState === "checking" || item.syncState === "idle") {
-    return "Checking lock...";
-  }
-
-  if (item.syncState === "error") {
-    return "Status unavailable";
-  }
-
+function sharedDocLockLabel(item) {
   if (!item.lock?.isActive) {
     return "Unlocked";
   }
 
-  if (item.lock.isMine) {
-    return "Locked by you";
-  }
-
-  return `Locked by ${item.lock.holderName || "another editor"}`;
+  return `Locked by ${item.lock.holderName || "Anonymous editor"}`;
 }
 
-function recentDocLockClass(item) {
-  if (item.syncState === "checking" || item.syncState === "idle" || item.syncState === "error") {
-    return "is-pending";
-  }
-
+function sharedDocLockClass(item) {
   if (!item.lock?.isActive) {
     return "is-idle";
   }
 
-  return item.lock.isMine ? "is-editing" : "is-readonly";
+  return "is-readonly";
+}
+
+function formatSharedDocUpdatedAt(value) {
+  if (!value) {
+    return "Updated time unavailable";
+  }
+
+  const parsed = new Date(value);
+
+  if (Number.isNaN(parsed.valueOf())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(parsed);
 }
 
 function renderNotice() {
@@ -765,16 +696,20 @@ function renderNotice() {
 }
 
 function renderHome() {
-  const recentItems = state.recentDocs
+  const sharedItems = state.sharedDocs
     .map(
       (item) => `
         <div class="recent-item">
           <div class="recent-copy">
             <div class="recent-header">
               <strong>${escapeHtml(item.name)}</strong>
-              <span class="status-pill recent-lock-pill ${recentDocLockClass(item)}">${escapeHtml(recentDocLockLabel(item))}</span>
+              <span class="status-pill recent-lock-pill ${sharedDocLockClass(item)}">${escapeHtml(sharedDocLockLabel(item))}</span>
             </div>
-            <small class="mono">${escapeHtml(item.id)}</small>
+            <div class="recent-meta">
+              <small class="mono">${escapeHtml(item.id)}</small>
+              <small class="muted">Updated ${escapeHtml(formatSharedDocUpdatedAt(item.updatedAt))}</small>
+              <small class="muted">v${escapeHtml(item.version || 1)}</small>
+            </div>
           </div>
           <button class="button button-ghost" data-open-doc="${item.id}">Open</button>
         </div>
@@ -852,11 +787,13 @@ function renderHome() {
       <div id="notice"></div>
 
       <section class="hero-panel" style="margin-top: 28px;">
-        <h2 class="section-title">Recent documents on this browser</h2>
+        <h2 class="section-title">Shared documents for everyone</h2>
         ${
-          recentItems
-            ? `<div class="recent-list">${recentItems}</div>`
-            : `<p class="muted">No recent documents yet. Import a <code>.po</code> file to create the first share link.</p>`
+          sharedItems
+            ? `<div class="recent-list">${sharedItems}</div>`
+            : state.sharedDocsLoading
+              ? `<p class="muted">Loading the shared document board...</p>`
+              : `<p class="muted">No shared documents yet. When anyone imports a <code>.po</code> file, it will appear here for everyone.</p>`
         }
       </section>
     </div>
@@ -1231,7 +1168,7 @@ async function boot() {
 
   render();
   scheduleTimers();
-  await refreshRecentDocs({ quiet: true });
+  await refreshSharedDocs({ quiet: true });
 }
 
 boot();

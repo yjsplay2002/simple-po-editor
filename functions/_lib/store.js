@@ -146,11 +146,17 @@ function buildMeta(document, storageMode) {
   };
 }
 
+function shapeSummary(document, sessionId, storageMode) {
+  return {
+    meta: buildMeta(document, storageMode),
+    lock: normalizeActiveLock(document, sessionId)
+  };
+}
+
 function shapeResponse(document, sessionId, storageMode, options = {}) {
   const response = {
     ok: true,
-    meta: buildMeta(document, storageMode),
-    lock: normalizeActiveLock(document, sessionId)
+    ...shapeSummary(document, sessionId, storageMode)
   };
 
   if (options.includeDocument !== false) {
@@ -321,6 +327,16 @@ export function getStorageMode(env) {
   return requireStorage(env);
 }
 
+function clampListLimit(limit, fallback = 24) {
+  const value = Number(limit);
+
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(1, Math.min(100, Math.floor(value)));
+}
+
 export async function createDocument(env, payload) {
   const storageMode = getStorageMode(env);
   const content = sanitizeDocument(payload.document);
@@ -380,6 +396,52 @@ export async function getDocument(env, id, sessionId = "", options = {}) {
   }
 
   return shapeResponse(record, sessionId, storageMode, options);
+}
+
+export async function listDocuments(env, sessionId = "", options = {}) {
+  const storageMode = getStorageMode(env);
+  const limit = clampListLimit(options.limit);
+
+  if (storageMode === "d1") {
+    await ensureSchema(env.DB);
+    const rows = await env.DB
+      .prepare(
+        "SELECT id, name, version, created_at, updated_at, lock_owner_id, lock_owner_name, lock_expires_at FROM documents ORDER BY updated_at DESC LIMIT ?"
+      )
+      .bind(limit)
+      .all();
+
+    return {
+      ok: true,
+      documents: (rows.results || []).map((row) =>
+        shapeSummary(
+          {
+            id: row.id,
+            name: row.name,
+            version: row.version,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+            lockOwnerId: row.lock_owner_id,
+            lockOwnerName: row.lock_owner_name,
+            lockExpiresAt: row.lock_expires_at
+          },
+          sessionId,
+          "d1"
+        )
+      )
+    };
+  }
+
+  const documents = Array.from(memoryStore().documents.values())
+    .map((record) => hydrateMemoryDocument(record))
+    .sort((left, right) => Date.parse(right.updatedAt || "") - Date.parse(left.updatedAt || ""))
+    .slice(0, limit)
+    .map((record) => shapeSummary(record, sessionId, "memory"));
+
+  return {
+    ok: true,
+    documents
+  };
 }
 
 export async function acquireLock(env, payload) {
